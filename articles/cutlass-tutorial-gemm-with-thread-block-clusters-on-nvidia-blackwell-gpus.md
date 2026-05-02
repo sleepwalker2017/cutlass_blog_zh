@@ -54,7 +54,7 @@ TMA 多播负载是一项旨在通过将相同张量切片同时加载到同一�
 
 现在我们来看看[CuTe Blackwell 示例 3](https://github.com/NVIDIA/cutlass/blob/main/examples/cute/tutorial/blackwell/03_mma_tma_multicast_sm100.cu)并了解在 GEMM 的上下文中如何使用多播。多播自然地转化为 GEMM 的切片方案，因为操作数 A 和 B 中的每个切片都用于计算多个输出切片。为了简单起见，我们首先考虑形状簇`<2,2,1>`（注意实际示例使用形状`<4,4,1>`）。每个 CTA 处理大小为 (bM, bN) 的输出 tile，因此每个簇处理总大小为 4 个输出 tile的 2×2 块`(2*bM, 2*bN)`.
 
-在每次主循环迭代中，每个 CTA 必须从 A 加载一个 (bM, bK) tile，从 B 加载一个 (bN, bK) tile，tile的 M 和 N 偏移量由网格中该 CTA 的行和列确定，K 偏移量由迭代确定。如果我们使用简单的 TMA，每个输出 tile将加载 2 个tile，从而导致集群加载 8 个tile。虽然像 CTA 光栅化这样的一些优化可以确保大部分负载来自 L2，但很难达到 100%，甚至 L2 命中在 MMA 操作的时间尺度上也会有显着的延迟。 TMA 多播允许我们仅加载所需的最少 4 个tile，并将它们放置在需要它们的 CTA 的 SMEM 中。更准确地说，每个 CTA 需要与同一行中的所有其他 CTA 相同的 A 操作数块，以及与同一列中的所有其他 CTA 相同的 B 操作数块。因此，每个 CTA 参与两个 TMA 多播操作 - 一个用于操作数 A 与同一行中的所有其他 CTA，另一个用于操作数 B 与同一列中的所有其他 CTA。
+在每次主循环迭代中，每个 CTA 必须从 A 加载一个 (bM, bK) tile，从 B 加载一个 (bN, bK) tile，tile的 M 和 N 偏移量由网格中该 CTA 的行和列确定，K 偏移量由迭代确定。如果我们使用简单的 TMA，每个输出 tile将加载 2 个tile，从而导致集群加载 8 个tile。虽然像 CTA rasterization这样的一些优化可以确保大部分负载来自 L2，但很难达到 100%，甚至 L2 命中在 MMA 操作的时间尺度上也会有显着的延迟。 TMA 多播允许我们仅加载所需的最少 4 个tile，并将它们放置在需要它们的 CTA 的 SMEM 中。更准确地说，每个 CTA 需要与同一行中的所有其他 CTA 相同的 A 操作数块，以及与同一列中的所有其他 CTA 相同的 B 操作数块。因此，每个 CTA 参与两个 TMA 多播操作 - 一个用于操作数 A 与同一行中的所有其他 CTA，另一个用于操作数 B 与同一列中的所有其他 CTA。
 
 ![图2.在这个 2×2 集群中，A 和 B 的每个tile可以使用多播同时加载到 2 个 CTA。](../images/cutlass-tutorial-gemm-with-thread-block-clusters-on-nvidia-blackwell-gpus/image-2-d482be316b.png)
 
@@ -446,7 +446,7 @@ mma_mcast_mask_c: 0x333f
 
 对于 TMA 多播掩码，对于 CTA 0，只有行或列中的偶数 CTA 被设置为 1，因为奇数 CTA 与数据无关。但对于 MMA，两个半部都设置为 1，因为 MMA 使用两个半部。
 
-为了构造这些掩码，我们可以再次使用行中所示的 CUTLASS 实用函数[2-10](https://research.colfax-intl.com/cutlass-tutorial-gemm-with-thread-block-clusters-on-nvidia-blackwell-gpus/#pair-umma-mainloop)。该结构与 1 SM 情况的不同之处在于，CTA 的 MMA 位掩码不再是其 TMA 位掩码的按位 OR，而是其 TMA 位掩码的按位 OR。*连同其对等体的 MMA 位掩码。*一般来说，`create_tma_multicast_mask<Modes...>(cluster_layout_vmnk, cta_in_cluster_coord_vmnk)`生成一个由所有 CTA 组成的位掩码，这些 CTA 仅与集群布局给定模式中指定的 CTA 不同。所以`create_tma_multicast_mask<2>`为参与的 CTA 创建掩码*TMA 该Atile的负载*（这可能与 N 模式下的 CTA 不同），而`create_tma_multicast_mask<0,2>`为参与的 CTA 创建掩码*使用此 A 板块的 MMA*（在V和N模式下可能与CTA不同）。 MMA 的最终掩码包含使用此 A tile或 B tile i.e 参与 MMA 的所有 CTA，这些 CTA 在 V 和 N 模式或 V 和 M 模式中可能不同。
+为了构造这些掩码，我们可以再次使用行中所示的 CUTLASS 实用函数[2-10](https://research.colfax-intl.com/cutlass-tutorial-gemm-with-thread-block-clusters-on-nvidia-blackwell-gpus/#pair-umma-mainloop)。该结构与 1 SM 情况的不同之处在于，CTA 的 MMA 位掩码不再是其 TMA 位掩码的按位 OR，而是其 TMA 位掩码的按位 OR。*连同其对等体的 MMA 位掩码。*一般来说，`create_tma_multicast_mask<Modes...>(cluster_layout_vmnk, cta_in_cluster_coord_vmnk)`生成一个由所有 CTA 组成的位掩码，这些 CTA 仅与集群布局给定模式中指定的 CTA 不同。所以`create_tma_multicast_mask<2>`为参与的 CTA 创建掩码*TMA 该Atile的负载*（这可能与 N 模式下的 CTA 不同），而`create_tma_multicast_mask<0,2>`为参与的 CTA 创建掩码*使用此 A 板块的 MMA*（在V和N模式下可能与CTA不同）。 MMA 的最终掩码包含使用此 A tile或 B tile 即参与 MMA 的所有 CTA，这些 CTA 在 V 和 N 模式或 V 和 M 模式中可能不同。
 
 ### 同步对-UMMA
 
@@ -460,7 +460,7 @@ mma_mcast_mask_c: 0x333f
 
 现在进行TMA组播同步。排队[38-41](https://research.colfax-intl.com/cutlass-tutorial-gemm-with-thread-block-clusters-on-nvidia-blackwell-gpus/#pair-umma-mainloop)TMA 使用位掩码启动，该位掩码将多播限制为具有相同奇偶校验的 CTA，因为每个 CTA 仅负责 MMA 块的一半。该位掩码还意味着通常这些 TMA 仅会以相同的奇偶校验到达 CTA。然而，TMA 的 wait_barrier （行[46](https://research.colfax-intl.com/cutlass-tutorial-gemm-with-thread-block-clusters-on-nvidia-blackwell-gpus/#pair-umma-mainloop)) 仅从偶数 CTA 中调用，并且必须等待整个 MMA tile。因此，尽管奇数 CTA 占据完全不相交的 TMA 位掩码，但仍需要以某种方式到达偶数 CTA 的 mbarrier。
 
-CUTLASS 以一种有启发性的方式解决了这个问题。首先，sm100介绍了一个`cta_group`预选赛为[TMA复制指令](https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cp-async-bulk-tensor)。将其设置为`cta_group::2`允许 TMA 副本到达正在执行的 CTA 或其对等 CTA 的 mbarrier。第二，[的版本`cute::copy`在这里使用](https://github.com/NVIDIA/cutlass/blob/main/include/cute/arch/copy_sm100_tma.hpp#L50)修改 mbarrier 地址
+CUTLASS 以一种有启发性的方式解决了这个问题。首先，sm100介绍了一个`cta_group`限定符为[TMA复制指令](https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cp-async-bulk-tensor)。将其设置为`cta_group::2`允许 TMA 副本到达正在执行的 CTA 或其对等 CTA 的 mbarrier。第二，[的版本`cute::copy`在这里使用](https://github.com/NVIDIA/cutlass/blob/main/include/cute/arch/copy_sm100_tma.hpp#L50)修改 mbarrier 地址
 
 ```
 

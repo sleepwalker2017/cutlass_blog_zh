@@ -50,11 +50,11 @@ tcgen05.mma.cta_group.kind.block_scale{.scale_vectorsize}
 .scale_vectorsize = { .scale_vec::1X, .scale_vec::2X, .scale_vec::4X, .block16, .block32 }
 ```
 
-该语法的大部分内容已在[第 1 部分](https://research.colfax-intl.com/cutlass-tutorial-writing-gemm-kernels-using-tensor-memory-for-nvidia-blackwell-gpus/)，包括指令描述符、A和B的SMEM描述符、从TMEM而不是SMEM读取A的能力，以及`enable-input-d`标志累积到 D 而不是覆盖它。对于块缩放指令，必须从 TMEM 中读出缩放因子；这`scale-A-tmem`和`scale-B-tmem`参数需要它们的基地址 i.e。它们的 (0, 0) 条目的 TMEM 地址。除了比例因子的 TMEM 布局之外，我们还必须解释`.kind`和`.scale_vectorsize`预选赛。
+该语法的大部分内容已在[第 1 部分](https://research.colfax-intl.com/cutlass-tutorial-writing-gemm-kernels-using-tensor-memory-for-nvidia-blackwell-gpus/)，包括指令描述符、A和B的SMEM描述符、从TMEM而不是SMEM读取A的能力，以及`enable-input-d`标志累积到 D 而不是覆盖它。对于块缩放指令，必须从 TMEM 中读出缩放因子；这`scale-A-tmem`和`scale-B-tmem`参数需要它们的基地址 即它们的 (0, 0) 条目的 TMEM 地址。除了比例因子的 TMEM 布局之外，我们还必须解释`.kind`和`.scale_vectorsize`限定符。
 
 ## `.kind`
 
-这`.kind`预选赛有三个选项：
+这`.kind`限定符有三个选项：
 
 - `mxf8f6f4`– 支持 8、6 和 4 位数据类型的混合输入。
 - `mxf4`– 4 位输入`ue8m0`比例因子。
@@ -62,19 +62,19 @@ tcgen05.mma.cta_group.kind.block_scale{.scale_vectorsize}
 
 限定符类型影响可用的操作数数据类型和比例因子类型。
 
-预选赛`mxf8f6f4`是块级版本`f8f6f4`我们在上一篇文章中讨论过的数据类型。它的要求与`f8f6f4`– 操作数的可用输入类型以及 16 字节 ZXQPH0ZXQEM/TMEM 填充要求与`f8f6f4`类型。因此，我们将遵循上一篇文章的操作数`mxf8f6f4`.
+限定符`mxf8f6f4`是块级版本`f8f6f4`我们在上一篇文章中讨论过的数据类型。它的要求与`f8f6f4`– 操作数的可用输入类型以及 16 字节 SMEM/TMEM 填充要求与`f8f6f4`类型。因此，我们将遵循上一篇文章的操作数`mxf8f6f4`.
 
 `mxf4`和`mxf4nvf4`两者都只适用于 4 位输入，具体来说`e2m1`。使用 4 位独占版本的优点是，与`mxf8f6f4`数据类型，4位数据类型不需要填充。相反，两个元素可以打包到一个 8 位容器中：
 
 ![图 2. SMEM 中 4 位值的打包，来自 PTX 文档。](../images/cutlass-tutorial-hardware-supported-block-scaling-with-nvidia-blackwell-gpus/image-5-bc3655281b.png)
 
-与使用 4 位数据类型相比，这会将 SMEM 的使用量减少两倍`mxf8f6f4`预选赛。因此，如果您知道工作负载专门使用 fp4，建议使用`mxf4`或者`mxf4nvf4`.
+与使用 4 位数据类型相比，这会将 SMEM 的使用量减少两倍`mxf8f6f4`限定符。因此，如果您知道工作负载专门使用 fp4，建议使用`mxf4`或者`mxf4nvf4`.
 
 `mxf4`进一步假设比例因子类型是`ue8m0`，同时对于`mxf4nvf4`，两种比例因子类型都是可能的。与操作数类型一样，比例因子数据类型是在运行时通过[指令描述符](https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-instruction-descriptor).
 
 ## `.scale_vectorsize`
 
-通过设置`.scale_vectorsize`预选赛`.block16`或者`.block32`，可以指定每个比例因子的操作数条目数：对于 mx 类型为 32，对于 mx 类型为 16`nvf4`.
+通过设置`.scale_vectorsize`限定符`.block16`或者`.block32`，可以指定每个比例因子的操作数条目数：对于 mx 类型为 32，对于 mx 类型为 16`nvf4`.
 
 然而，在内部，Tensor Core 似乎以不同的方式考虑向量大小。回想一下，A 和 B 的 UMMA 输入原子在 K 模式中始终为 32 字节宽（我们将这些称为“UMMA 原子行”，将 K 模式视为两个矩阵的行模式）。 我们会写`atom_K`对于 MMA 原子的大小，所以`atom_K = 32`为了`mxf8f6f4`和`atom_K = 64`为了`mxf4`和`mxf4nvf4`。 与之前的文章一样，我们将使用 (bM, bN, bK) 作为主循环tile的大小，该tile通常由几个 UMMA 原子组成，在 K 模式中重复。在这篇文章中，我们将始终采取`bK`添加最多 4 个 UMMA 原子（128 字节或 1 个缓存行），所以`bK = 128`对于8位输入和`bK = 256`对于 4 位输入。
 
@@ -143,7 +143,7 @@ atom_SFK = atom_K / sf_vec_size
 (((32, 4), REST_M), ((16, 4), REST_K)) : (((16, 4), 512 * REST_K), ((0, 1), 512))
 ```
 
-有这个的瓷砖**交错布局**可以以矢量化、合并、无银行冲突的方式透明地从 GMEM 加载到 SMEM，然后从 SMEM 加载到 TMEM。请注意，这与比例因子向量大小或 MMA k-tile 大小无关 - 这些仅决定需要从 A 加载哪些相应数据，以及上面的tile对应于多少个MMA原子。
+这种 **交错布局** 的 tile 可以以矢量化、合并且无 bank conflict 的方式，从 GMEM 高效加载到 SMEM，再从 SMEM 加载到 TMEM。请注意，这与比例因子向量大小或 MMA 的 k-tile 大小无关；这些参数只决定从 A 侧需要读取哪些数据，以及上面的 tile 对应多少个 MMA 原子。
 
 单纯的量化可能会产生一个简单的 K 大调的比例因子张量。在这种情况下，我们必须排列并渲染它连续才能使其处于交错布局中：
 
@@ -286,7 +286,7 @@ cute.copy(
 )
 ```
 
-注意`gSFA_mkl`实际上并没有切入`mSFA_mkl`但这只是一种重新安排。 由于内核使用持久tile调度程序，这会分离出不依赖于特定工作tile的逻辑 - 我们保留`RestM`模式，直到我们到达分配work tile的代码，然后`tAgSFA`被切片成为`tAgSFA_slice`在调用TMA之前复制。
+注意`gSFA_mkl`实际上并没有切入`mSFA_mkl`但这只是一种重新安排。 由于内核使用持久tile 调度器，这会分离出不依赖于特定工作tile的逻辑 - 我们保留`RestM`模式，直到我们到达分配work tile的代码，然后`tAgSFA`被切片成为`tAgSFA_slice`在调用TMA之前复制。
 
 SFA 和 SFB 在内核的同一点与 A 和 B 一样需要，因此可以使用相同的 TMA 管道加载它们。
 
@@ -307,9 +307,9 @@ SFA 和 SFB 在内核的同一点与 A 和 B 一样需要，因此可以使用�
 
 请注意以下事项：
 
-- 这`sfa_smem_layout_staged`的布局与 TMEM 图相匹配[图4](https://research.colfax-intl.com/cutlass-tutorial-hardware-supported-block-scaling-with-nvidia-blackwell-gpus/#figure-4): 32 : 0 对应于 sf_vec_K — 单个 SFA 元素应用于 K 方向上的 A 的 32 个元素  在这种情况下，32 也是 MMA 原子的 K 范围。  4 : 1 对应于 MMA_K — 4 个连续的 SFA 元素用于在 K 方向上重复的 4 个单独的 MMA 原子  (32, 4) : (16, 4) 对应于 sf_tile_M — 32 个比例因子行对应于 32 个 MMA A 行（跨tile的 1 行，i.e。在 GMEM 和 SMEM 中为 16 个值），然后接下来的 32 个 MMA A 行在比例因子布局中重复 4 列，并且等等。
+- 这`sfa_smem_layout_staged`的布局与 TMEM 图相匹配[图4](https://research.colfax-intl.com/cutlass-tutorial-hardware-supported-block-scaling-with-nvidia-blackwell-gpus/#figure-4): 32 : 0 对应于 sf_vec_K — 单个 SFA 元素应用于 K 方向上的 A 的 32 个元素  在这种情况下，32 也是 MMA 原子的 K 范围。  4 : 1 对应于 MMA_K — 4 个连续的 SFA 元素用于在 K 方向上重复的 4 个单独的 MMA 原子  (32, 4) : (16, 4) 对应于 sf_tile_M — 32 个比例因子行对应于 32 个 MMA A 行（跨tile的 1 行，即在 GMEM 和 SMEM 中为 16 个值），然后接下来的 32 个 MMA A 行在比例因子布局中重复 4 列，并且等等。
 - `sfb_smem_layout_staged`类似，除了注意有一个非平凡模式 2 : 512`rest_atom_N`。 这意味着在另一个更粗的尺度上交错比例因子——对于 N128 到 N255，SF tile需要重复一次，因此每个 SF tile仅保存 UMMA 原子的 B 操作数的一半的比例因子。
-- 由于每个比例因子tile在 SMEM 中是连续的，并且将由扭曲宽度复制到 TMEM`tcgen05.cp`指令，它不需要被混合。
+- 由于每个比例因子tile在 SMEM 中是连续的，并且将由warp宽度复制到 TMEM`tcgen05.cp`指令，它不需要被混合。
 
 如果我们这样做`nvf4`GEMM（对应`.block16/.scale_vec::4X`TMEM布局[图5](https://research.colfax-intl.com/cutlass-tutorial-hardware-supported-block-scaling-with-nvidia-blackwell-gpus/#figure-5)），比例因子tile将如下所示：
 
@@ -346,9 +346,9 @@ SFA 和 SFB 在内核的同一点与 A 和 B 一样需要，因此可以使用�
 
 ## 将比例因子数据加载到 TMEM
 
-一旦加载到SMEM，比例因子数据就需要加载到TMEM。这是使用异步完成的[`tcgen05.cp`操作说明](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#tcgen05-instructions-tcgen05-cp)。喜欢`tcgen05.ld`和`tcgen05.st`, `tcgen05.cp`只能移动a中的数据[非常有限的模式集](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#tcgen05-data-movement-shape)，但这些对于这种类型的内核来说已经足够了。此操作应该由发出 MMA 的扭曲来完成，因为 SMEM -> TMEM 副本 (`tcgen05.cp`）和 MMA 指令（`tcgen05.mma`）是在同一内部管道上排序的异步指令。
+一旦加载到SMEM，比例因子数据就需要加载到TMEM。这是使用异步完成的[`tcgen05.cp`操作说明](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#tcgen05-instructions-tcgen05-cp)。喜欢`tcgen05.ld`和`tcgen05.st`, `tcgen05.cp`只能移动a中的数据[非常有限的模式集](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#tcgen05-data-movement-shape)，但这些对于这种类型的内核来说已经足够了。此操作应该由发出 MMA 的warp来完成，因为 SMEM -> TMEM 副本 (`tcgen05.cp`）和 MMA 指令（`tcgen05.mma`）是在同一内部管道上排序的异步指令。
 
-在 MMA 扭曲的分支中，我们看到：
+在 MMA warp的分支中，我们看到：
 
 ```
 
@@ -401,7 +401,7 @@ tcgen05.find_tmem_tensor_col_offset(tCtSFB) = 8
 - 32：262144指的是SFA的32个通道。正如我们在[本系列的第 1 部分](https://research.colfax-intl.com/cutlass-tutorial-writing-gemm-kernels-using-tensor-memory-for-nvidia-blackwell-gpus/)，TMEM 中的相邻通道的地址跨度为 65536（另请参阅[PTX 文档](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#tensor-memory-layout)）。但是，TMEM 列的宽度为 4 个字节，并且 CUTLASS 在内部向地址添加两个低位以跟踪列内字节的位置。因此，从 CUTLASS 的角度来看，字节大小数据的通道之间的步幅为 4 * 65536 = 262144。
 - MMA_K 的 4:1 证实了这一点 — 这些单独的比例因子是位于同一 TMEM 列中的相邻字节。
 
-4 : 8388608，其中 8388608 = 32 * 262144，是一种我们称为“多播”的新模式。正如我们在[第 1 部分](https://research.colfax-intl.com/cutlass-tutorial-writing-gemm-kernels-using-tensor-memory-for-nvidia-blackwell-gpus/)，扭曲通常只能从 TMEM 的 32 个通道加载或存储，对应于其在warpgroup中的位置。然而，这是可能的`tcgen05.cp`一个 warp 将相同的数据复制到所有 4 个 32 通道象限，这就是这里正在做的事情。准确地说，内核中构建的 s2t 副本[`mainloop_s2t_copy_and_partition`方法](https://github.com/NVIDIA/cutlass/blob/main/examples/python/CuTeDSL/blackwell/dense_blockscaled_gemm_persistent.py#L1534)是 CUTLASS 类的实例`cute.nvgpu.tcgen05.Cp4x32x128bOp`，扭曲`tcgen05.cp`和`.shape = .32x128b`（即，1 个 SF 瓷砖）和`.multicast = .warpx4`。从MMA的角度来看，[PTX 文档](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#tcgen05-block-scaling)确认“A 和 B 矩阵的比例因子需要复制到张量内存的所有 32 个通道分区。”
+4 : 8388608，其中 8388608 = 32 * 262144，是一种我们称为“多播”的新模式。正如我们在[第 1 部分](https://research.colfax-intl.com/cutlass-tutorial-writing-gemm-kernels-using-tensor-memory-for-nvidia-blackwell-gpus/)，warp通常只能从 TMEM 的 32 个通道加载或存储，对应于其在warpgroup中的位置。然而，这是可能的`tcgen05.cp`一个 warp 将相同的数据复制到所有 4 个 32 通道象限，这就是这里正在做的事情。准确地说，内核中构建的 s2t 副本[`mainloop_s2t_copy_and_partition`方法](https://github.com/NVIDIA/cutlass/blob/main/examples/python/CuTeDSL/blackwell/dense_blockscaled_gemm_persistent.py#L1534)是 CUTLASS 类的实例`cute.nvgpu.tcgen05.Cp4x32x128bOp`，warp`tcgen05.cp`和`.shape = .32x128b`（即，1 个 SF tile）和`.multicast = .warpx4`。从MMA的角度来看，[PTX 文档](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#tcgen05-block-scaling)确认“A 和 B 矩阵的比例因子需要复制到张量内存的所有 32 个通道分区。”
 
 因此，本例的 TMEM 布局如下所示：
 
@@ -433,7 +433,7 @@ Copy Atom
 ((((32,8),4),(16,4)),1,4):((((262144,4),8388608),(0,1)),0,32)
 ```
 
-就像在 SMEM 中一样，SF 值`tCtSFA`相邻的 UMMA 原子相距 16 列（i.e。相距 1 个 SF 平铺），而 block32/1x 原子相距 1 列。与 SMEM 不同，SF 值`tCtSFB`对应e.g。`N`=0 且`N`UMMA 原子中的 =128 位于相邻的 SF 区块中，而不是相隔 4 个 SF 区块。
+就像在 SMEM 中一样，SF 值`tCtSFA`相邻的 UMMA 原子相距 16 列（即相距 1 个 SF 平铺），而 block32/1x 原子相距 1 列。与 SMEM 不同，SF 值`tCtSFB`对应e.g。`N`=0 且`N`UMMA 原子中的 =128 位于相邻的 SF 区块中，而不是相隔 4 个 SF 区块。
 
 block16/4x 占用 TMEM 的对象如下所示：
 
@@ -537,7 +537,7 @@ Copy Atom
   Value type:      f8E8M0FNU
 ```
 
-在PTX中，这对应于`.cta_group::2`预选赛`tcgen05.cp`，并且意味着虽然只有领导者 CTA 发出`s2t`副本，副本对于两个 CTA 执行相同。
+在PTX中，这对应于`.cta_group::2`限定符`tcgen05.cp`，并且意味着虽然只有领导者 CTA 发出`s2t`副本，副本对于两个 CTA 执行相同。
 
 因此，在年底`s2t`副本中，该对中的每个 CTA 在其 TMEM 中都有 SFA 的不同一半（在其 4 组 32 通道中多播 4 次），并且两个 CTA 都具有相同的 SFB 块（也是多播）。
 
@@ -593,7 +593,7 @@ sfb_smem_layout_staged: ((((32,4),2),(32,1)),1,4,5):((((16,4),512),(0,0)),0,1,10
 
 ArithTuple 有 5 个维度，按顺序对应于 SFB tile的行、SFB tile的列、SFB tile坐标`N`, SFB 中的tile坐标`K`, SFB 批处理模式下的tile坐标`L`（我们假设在这篇文章中微不足道）。
 
-回想一下，对 TMA 副本的调用会加载所提供张量的第一个模式，因此两者`bN`= 192 和 256 加载 SFB 的两个tile，但是`RestN`模式看起来很奇怪`bN`= 192 — 是 (2,16) : (1@2, 3@2)。即踩工作砖`N`坐标按 1 移动仅移动 1 个 SFB 方块，同时在`N`方向移动 3 个 SFB 格。 换句话说，每个奇怪的工作瓷砖`N`方向步进 1 SFB 区块，每个偶数工作区块步进 2 SFB 区块。图片看起来像这样：
+回想一下，调用 TMA copy 时会加载传入张量的第一个 mode。对 `bN = 192` 和 `bN = 256`，都会加载 2 个 SFB tile，但 `bN = 192` 时 `RestN` mode 会比较特殊：`(2,16):(1@2, 3@2)`。也就是说，work tile 的 `N` 坐标每加 1，并不总是前进相同数量的 SFB block：有时前进 1 个，有时前进 2 个。图示如下：
 
 ![图 10. 当 bN = 192 时，SFB 的 TMA 加载模式。每个具有偶数 N 坐标的work tile和后面的奇数work tile都加载中间的 SFB tile，但只使用其中的一半。](../images/cutlass-tutorial-hardware-supported-block-scaling-with-nvidia-blackwell-gpus/image-2-132cc88e6f.png)
 

@@ -114,7 +114,7 @@ CUTLASS 表示法使得人们可以立即读出包装的 PTX 指令和 MMA 原�
 
 - `X`和`Y`是操作数的数据类型。
 - `Z`是累加器的数据类型。
-- `MxNxK`是瓷砖尺寸`wgmma`指令使用“wgmma 原子”进行计算。并非所有值`MxNxK`是可能的。这是[允许的形状列表](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#asynchronous-warpgroup-level-matrix-shape): `M`始终是 64，`N`是从 8 到 256 的 8 的倍数，对于 16 位操作数数据类型，`K`是 16（更一般地说，`K`固定为 32 字节）。
+- `MxNxK`是tile尺寸`wgmma`指令使用“wgmma 原子”进行计算。并非所有值`MxNxK`是可能的。这是[允许的形状列表](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#asynchronous-warpgroup-level-matrix-shape): `M`始终是 64，`N`是从 8 到 256 的 8 的倍数，对于 16 位操作数数据类型，`K`是 16（更一般地说，`K`固定为 32 字节）。
 - 后缀`RS`或者`SS`指示是否操作数`A`来自寄存器（`R`）或共享内存（`S`）。操作数`B`总是来自共享内存，因此`S`.
 - 两个模板参数表示操作数是否`A`和`B`是内存连续的`MN`模式或`K`模式。例如，在 BLAS 表示法中，操作数都是`K`-major 对应于 TN gemm（参见[这张桌子](https://github.com/NVIDIA/cutlass/blob/main/media/docs/cute/0x_gemm_tutorial.md#aside-m-major-n-major-k-major)）。请注意，对于 16 位操作数数据类型，内存布局具有灵活性：`MN`-主要或`K`-主要的。然而，对于非 16 位操作数数据类型，**布局必须始终是`K`-主要的**.
 
@@ -424,7 +424,7 @@ No swizzle       : Swizzle&lt;0,4,3> o smem_ptr o ((T,1,m),(8,k)):((1,T,SBO),(1T
 
 ### 结论
 
-在 GEMM 系列的[第 1 部分] 中，我们介绍了使用 WGMMA（扭曲群矩阵乘法和累加）作为基于 Hopper 的 GEMM 中的原语所涉及的核心概念。
+在 GEMM 系列的[第 1 部分] 中，我们介绍了使用 WGMMA（warp群矩阵乘法和累加）作为基于 Hopper 的 GEMM 中的原语所涉及的核心概念。
 
 WGMMA 需要一个 warpgroup（128 个线程）来共同执行矩阵乘法，并且只能对矩阵的某些片段进行操作。我们研究了其中涉及的特殊形状和布局，重点是如何使用规范的 GMMA 布局来构造保证被 WGMMA 接受的操作数布局=>`tile_to_shape`图案。
 

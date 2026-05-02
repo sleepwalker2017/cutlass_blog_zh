@@ -159,7 +159,7 @@ CUTLASS访问树的核心是`Sm90EVT`，这是一个别名`Sm90TreeVisitor`。�
 
 我们看到该树中使用了其他几个节点。来自 C 和累加器 (AB) 的值通过以下方式获得`Sm90SrcFetch`和`Sm90AccFetch`分别。标量通过使用获得`Sm90ScalarBroadcast`。有关可用节点的完整文档，请参阅我们的 GitHub。
 
-![图 2. 左：Sm90LinCombEltAct 的树结构。非叶节点（黑色）是树访问者，i.e。 Sm90EVT 节点。右：计算的另一种视图，它将每个树访问者替换为它执行的操作，并使计算流程向下移动。](../images/epilogue_visitor_tree/image-11-6e5b7a5698.png)
+![图 2. 左：Sm90LinCombEltAct 的树结构。非叶节点（黑色）是树访问者，即 Sm90EVT 节点。右：计算的另一种视图，它将每个树访问者替换为它执行的操作，并使计算流程向下移动。](../images/epilogue_visitor_tree/image-11-6e5b7a5698.png)
 
 我们倾向于以稍微不同的方式思考尾声操作——**计算图**在右边**图2**。在此图中，计算流程向下移动，非叶节点只是接受来自其他地方的输入的操作。正如我们稍后将讨论的，这样的图根本不需要是树。尾声访客树始终是树；我们将它们的根部放在顶部，以便流*递归*向下移动，非叶节点是树访问者。每个树访问者对其其余子节点执行由其最左边的子节点指定的操作。
 
@@ -329,7 +329,7 @@ using BCELossEVT =
 - 这`Sm90ColBroadcast`节点与批量 GEMM 一起使用。迈过一大步`Stride<_1, _0, int>`允许在运行时给出批量维度的步幅。
 - 拓扑访问者的语法与上面的简单示例类似，但更复杂。
 - CUTLASS（从3.5版本开始）没有函子模板计算日志，但自己写一个并不难。这是`FastLog`.
-- 这`Sm90ScalarReduction`节点在两个范围内进行缩减：首先，使用“寄存器缩减函数”进行线程级缩减；然后，使用原子“GMEM 归约函数”将全局归约为 GMEM。行和列缩减还将使用扭曲洗牌操作执行扭曲范围缩减，并使用 SMEM 执行 CTA 范围缩减。
+- 这`Sm90ScalarReduction`节点在两个范围内进行缩减：首先，使用“寄存器缩减函数”进行线程级缩减；然后，使用原子“GMEM 归约函数”将全局归约为 GMEM。行和列缩减还将使用warp洗牌操作执行warp范围缩减，并使用 SMEM 执行 CTA 范围缩减。
 
 拓扑访问者的参数是它访问的每个节点的参数列表。整个EVT的参数如下：
 
@@ -381,9 +381,9 @@ BCELossEVT::Arguments args_BCE =
 
 ## 附录：CUTLASS对EVT的实现
 
-编写自己的自定义内核的高级用户可能还希望使用 EVT 来实现尾声或尾声集合，并对内核的其余部分进行最少的修改。为此，值得研究一下 CUTLASS 如何处理 EVT 对象[TMA 扭曲专用尾声](https://github.com/NVIDIA/cutlass/blob/44dae8b90ef232ea663727470dfbbe9daff6972d/include/cutlass/epilogue/collective/sm90_epilogue_tma_warpspecialized.hpp#L770)在其 CollectiveBuilder 构建的内核中使用。了解这种结构可以帮助开发人员与 CUTLASS 的 EVT 对象进行交互，或者编写自己的系统进行尾声融合。请注意，我们的讨论从 CUTLASS 的 3.5 版本开始是准确的；由于这些是 CUTLASS EVT 实现的内部细节，因此它们可能在未来版本中发生变化。
+编写自己的自定义内核的高级用户可能还希望使用 EVT 来实现尾声或尾声集合，并对内核的其余部分进行最少的修改。为此，值得研究一下 CUTLASS 如何处理 EVT 对象[TMA warp专用尾声](https://github.com/NVIDIA/cutlass/blob/44dae8b90ef232ea663727470dfbbe9daff6972d/include/cutlass/epilogue/collective/sm90_epilogue_tma_warpspecialized.hpp#L770)在其 CollectiveBuilder 构建的内核中使用。了解这种结构可以帮助开发人员与 CUTLASS 的 EVT 对象进行交互，或者编写自己的系统进行尾声融合。请注意，我们的讨论从 CUTLASS 的 3.5 版本开始是准确的；由于这些是 CUTLASS EVT 实现的内部细节，因此它们可能在未来版本中发生变化。
 
-我们将首先描述尾声的高级结构。每个 CTA 负责形状的输出 tile`(CTA_M, CTA_N)`，并循环形状的子tile`(EPI_TILE_M, EPI_TILE_N)`。尾声搭载了主循环的warp specialization；主循环中的生产者扭曲将通过执行以下命令来加载 C 和尾声所需的任何辅助矩阵`load()`方法，而消费者扭曲将通过执行来执行计算和存储`store()`方法。这两种类型的扭曲在一个`Pipeline`被称为`load_pipeline`。 （这`load()`如果在编译时确定尾声不需要加载，则不会使用方法和管道。）由于消费者扭曲需要在 SMEM 中暂存数据以执行 TMA 存储，因此这些扭曲通过另一个管道彼此同步，`store_pipeline`.
+我们将首先描述尾声的高级结构。每个 CTA 负责形状的输出 tile`(CTA_M, CTA_N)`，并循环形状的子tile`(EPI_TILE_M, EPI_TILE_N)`。尾声搭载了主循环的warp specialization；主循环中的生产者warp将通过执行以下命令来加载 C 和尾声所需的任何辅助矩阵`load()`方法，而消费者warp将通过执行来执行计算和存储`store()`方法。这两种类型的warp在一个`Pipeline`被称为`load_pipeline`。 （这`load()`如果在编译时确定尾声不需要加载，则不会使用方法和管道。）由于消费者warp需要在 SMEM 中暂存数据以执行 TMA 存储，因此这些warp通过另一个管道彼此同步，`store_pipeline`.
 
 对应这两种方法，epilogue访问者树支持两种工厂函数：`get_producer_load_callbacks()`和`get_consumer_store_callbacks()`。这些产生对象`pld_callbacks`和`cst_callbacks`将执行 EVT 所需的所有操作`load()`和`store()`分别。每个 EVT 节点都定义这些回调对象中的一个或两个的一些方法，使其能够在内核中的正确位置执行操作。
 

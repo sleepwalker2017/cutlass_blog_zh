@@ -97,9 +97,9 @@ tcgen05.ld.sync.aligned.shape.num.b32    r, [taddr];
 .num    = { .x1, .x2, .x4, .x8, .x16, .x32, .x64, .x128 }
 ```
 
-如图所示`.sync.aligned`预选赛，`tcgen05.ld`是一个 warp 范围的指令，其中 warp 中的所有线程必须执行相同的指令并作为 warp 同步，类似于之前的`ldmatrix`操作说明。
+如图所示`.sync.aligned`限定符，`tcgen05.ld`是一个 warp 范围的指令，其中 warp 中的所有线程必须执行相同的指令并作为 warp 同步，类似于之前的`ldmatrix`操作说明。
 
-`tcgen05.ld`支持各种数据移动形状，如[PTX指南](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-shape)。它们一般用{lanes}x{bits}表示；我们的示例使用 32x32b，它对应于 32 位的 32 个通道（或数据路径），跨单个扭曲。下一个组件，`.num`，描述了在列维度中重复的次数。对于我们的示例，我们使用执行单次加载的 .x1。在单条指令中，一个 warp 最多可以加载lane * bits * num <= 128 kb (16 kB)，相当于每个线程128个32位寄存器。最后，回想一下，每个 warp 只能访问 128 个 TMEM 通道中的 32 个。
+`tcgen05.ld`支持各种数据移动形状，如[PTX指南](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-shape)。它们一般用{lanes}x{bits}表示；我们的示例使用 32x32b，它对应于 32 位的 32 个通道（或数据路径），跨单个warp。下一个组件，`.num`，描述了在列维度中重复的次数。对于我们的示例，我们使用执行单次加载的 .x1。在单条指令中，一个 warp 最多可以加载lane * bits * num <= 128 kb (16 kB)，相当于每个线程128个32位寄存器。最后，回想一下，每个 warp 只能访问 128 个 TMEM 通道中的 32 个。
 
 这张图来自于[PTX 文档](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#tcgen05-mma-fragment-3232b)显示我们的`tcgen05.ld.sync.aligned.32x32b.x1.b32`手术：
 
@@ -111,7 +111,7 @@ tcgen05.ld.sync.aligned.shape.num.b32    r, [taddr];
 
 由于有大量的选择，自然的问题是如何选择正确的变体。通道数受所使用的 MMA 指令影响最大；不同的`tcgen05.mma`变体[导致不同的输出布局](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#tcgen05-data-path-layout-organization)，以及不同的`tcgen05.ld`形状适合不同的情况。对于位宽和`.num`，考虑更多的是性能和资源。较大的重复将减少发出的指令数量，并且可以促进矢量化。然而，较大的`.num`价值观也[需要更多寄存器](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#tcgen05-num-shapes-ld)。所以这个值是一个调整参数。
 
-现在我们了解了 UMMA 指令的功能，接下来我们讨论将用来访问它的 ZXQPH0ZXQ/ZXQPH1ZXQ 接口。与之前的 CUTLASS MMA 抽象一样，这是通过以下方式描述的：
+现在我们了解了 UMMA 指令的功能，接下来我们讨论将用来访问它的 CuTe/CUTLASS 接口。与之前的 CUTLASS MMA 抽象一样，这是通过以下方式描述的：
 
 - cute/arch/目录中的MMA_Atom，它是相应PTX指令的包装器；
 - cute/atom/ 目录中的 MMA_Traits，其中包含 CuTe 布局和用于以 CUTLASS 原生方式与原子交互的其他元数据。
@@ -164,7 +164,7 @@ struct MMA_Traits<SM100_MMA_F16BF16_SS<a_type, b_type, c_type,
 最后，简要说明原子名称的解剖结构。`SM100_MMA_F16BF16_SS`可以解构为以下几个部分。
 
 - `SM100_MMA`: 指定指令。简单地说，UMMA 指令`sm100`.
-- `F16BF16`：指定 A 和 B 可接受的输入类型。在这种情况下，可以是`fp16`或者`bf16`。请注意，这映射到`.kind`预选赛`tcgen05.mma`(例如，`.kind::f16`），而确切的输入类型由[指令描述符](https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-instuction-desc-kind-tf32-f16-f8f6f4).
+- `F16BF16`：指定 A 和 B 可接受的输入类型。在这种情况下，可以是`fp16`或者`bf16`。请注意，这映射到`.kind`限定符`tcgen05.mma`(例如，`.kind::f16`），而确切的输入类型由[指令描述符](https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-instuction-desc-kind-tf32-f16-f8f6f4).
 - `SS`：指定A和B的内存位置。`SS`两者都在 SMEM 中，而`TS`A 位于 TMEM 中，B 位于 SMEM 中。
 - 后缀：对于更复杂的情况还有其他后缀，例如块缩放或 2-SM UMMA。
 
@@ -247,7 +247,7 @@ print(tCgD); // ((_128,_256),_1,_1):((1024,_1),_0,_0)
 
 ### 处理集群
 
-到目前为止，我们只讨论了 UMMA 的 1 SM 情况。然而，在每个 UMMA 涉及 2 个 SM 的情况下，UMMA 形状与 CTA 形状不同，我们需要对`tiled_mma`与对等点 CTA ID（i.e。CTA 在其对中的位置，0 或 1）。我们简要地离题以展示如何适应这种情况，并将更广泛的讨论推迟到本系列的第 2 部分。
+到目前为止，我们只讨论了 UMMA 的 1 SM 情况。然而，在每个 UMMA 涉及 2 个 SM 的情况下，UMMA 形状与 CTA 形状不同，我们需要对`tiled_mma`与对等点 CTA ID（即CTA 在其对中的位置，0 或 1）。我们简要地离题以展示如何适应这种情况，并将更广泛的讨论推迟到本系列的第 2 部分。
 
 每个 CTA 对必然由簇中一对相邻的 CTA 组成。这意味着我们可以按如下方式提取对等 CTA ID。
 
@@ -430,7 +430,7 @@ struct SM100_TMEM_LOAD_32dp32b1x
 };
 ```
 
-使用这个原子，我们可以设置一个 TiledCopy 将累加器结果从 TMEM 提取到 RMEM。请注意，与我们在本示例中看到的其余 CTA 级操作不同，我们回到了扭曲和线程级操作 - 因为数据必须移动到寄存器才能执行尾声。
+使用这个原子，我们可以设置一个 TiledCopy 将累加器结果从 TMEM 提取到 RMEM。请注意，与我们在本示例中看到的其余 CTA 级操作不同，我们回到了warp和线程级操作 - 因为数据必须移动到寄存器才能执行尾声。
 
 ```
 
@@ -448,7 +448,7 @@ Tensor tDrAcc = make_tensor<AccType>(shape(tDgD));
 copy(tiled_t2r_copy, tDtAcc, tDrAcc);
 ```
 
-这里我们使用一个专门的函数，`make_tmem_copy`，从复制原子和 TMEM 张量推导出 TV 布局并创建 TiledCopy。关于这个函数需要了解的一件重要的事情是*它被硬编码为使用 4 个扭曲或 1 个warpgroup。*如前一节所述，TMEM 的某些区域只能由基于扭曲索引 mod 4 的warpgroup中的相应扭曲访问。[PTX 手册中的图表](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#layout-d-m-128-cta-group-1)在我们的例子中,显示了如何将数据分配给扭曲:：
+这里我们使用一个专门的函数，`make_tmem_copy`，从复制原子和 TMEM 张量推导出 TV 布局并创建 TiledCopy。关于这个函数需要了解的一件重要的事情是*它被硬编码为使用 4 个warp或 1 个warpgroup。*如前一节所述，TMEM 的某些区域只能由基于warp索引 mod 4 的warpgroup中的相应warp访问。[PTX 手册中的图表](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#layout-d-m-128-cta-group-1)在我们的例子中,显示了如何将数据分配给warp:：
 
 ![](../images/cutlass-tutorial-writing-gemm-kernels-using-tensor-memory-for-nvidia-blackwell-gpus/tcgen05-data-path-layout-d1-1f136eac6b.png)
 
@@ -472,7 +472,7 @@ struct Copy_Traits<SM100_TMEM_LOAD_32dp32b1x>
 };
 ```
 
-布局`ThrID`定义从逻辑线程 ID 到线程束中线程索引的映射；价值`32`意味着这是一个扭曲范围的操作。
+布局`ThrID`定义从逻辑线程 ID 到线程束中线程索引的映射；价值`32`意味着这是一个warp范围的操作。
 
 `ValID`告诉我们从逻辑位id到位地址的映射；例如，位 35 被映射为`ValID`布局到车道 1 上的第 3 位。布局具有形状（位，车道）和车道的步幅，`TMEM::DP_b`， 是`1<<21`; `1<<16`正如我们之前看到的，来自 TMEM 寻址方案，额外的 5 来自单元格`1<<5=32`位宽。
 
@@ -516,7 +516,7 @@ if (elect_one_warp) {
   }
 ```
 
-正如前面部分所讨论的，一个 warp 执行分配，传递多个列和一个指向共享内存中 32 位值的指针；这`allocate`方法然后存储分配的 TMEM 的起始（最低（通道、列））的 32 位地址。尽管此 MMA 指令仅需要 256 列，但为了简单起见，内核分配了 TMEM 的所有 512 列。请注意，虽然只有一个线程将 TMEM 地址传递给 MMA 指令，但所有线程都需要它从 TMEM 加载数据作为尾声，要求它通过共享内存传递。最后，同样的扭曲被称为`allocate`还得打电话`free`。作为一个稍微高级的功能，`release_allocation_lock`方法是一个包装器[`tcgen05.relinquish_alloc_permit`](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#tcgen05-instructions-tcgen05-alloc-dealloc-relinquish-alloc-permit);显然，这是保证 CTA 不会执行任何进一步的 TMEM 分配，从而允许未来的 CTA 排队等待相同的 SM。您可以在中查看一些更完整的 TMEM 管理示例[CUTLASS sm100 GEMM 内核](https://github.com/NVIDIA/cutlass/blob/main/include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp#L535).
+正如前面部分所讨论的，一个 warp 执行分配，传递多个列和一个指向共享内存中 32 位值的指针；这`allocate`方法然后存储分配的 TMEM 的起始（最低（通道、列））的 32 位地址。尽管此 MMA 指令仅需要 256 列，但为了简单起见，内核分配了 TMEM 的所有 512 列。请注意，虽然只有一个线程将 TMEM 地址传递给 MMA 指令，但所有线程都需要它从 TMEM 加载数据作为尾声，要求它通过共享内存传递。最后，同样的warp被称为`allocate`还得打电话`free`。作为一个稍微高级的功能，`release_allocation_lock`方法是一个包装器[`tcgen05.relinquish_alloc_permit`](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#tcgen05-instructions-tcgen05-alloc-dealloc-relinquish-alloc-permit);显然，这是保证 CTA 不会执行任何进一步的 TMEM 分配，从而允许未来的 CTA 排队等待相同的 SM。您可以在中查看一些更完整的 TMEM 管理示例[CUTLASS sm100 GEMM 内核](https://github.com/NVIDIA/cutlass/blob/main/include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp#L535).
 
 为了帮助 TMEM 管理，nvcc 添加了标志`--g-tensor-memory-access-check`。启用此标志后，在运行时内核将在任何未初始化或越界 TMEM 访问上出错并打印错误消息。
 

@@ -15,7 +15,7 @@ english_markdown: "articles-en/tutorial-matrix-transpose-in-cutlass.en.md"
 
 本教程的目标是在使用 NVIDIA® GPU 进行编程时引出涉及内存复制的概念和技术[CUTLASS](https://github.com/NVIDIA/cutlass/)及其核心后端库CuTe。具体来说，我们将研究以下任务：[矩阵转置](https://en.wikipedia.org/wiki/Transpose)作为这些概念的说明性示例。我们选择这个任务是因为它除了将数据从一组地址复制到另一组地址之外不涉及任何操作，这使我们能够独立研究内存复制优化的那些方面，例如合并访问，这些方面可以与也涉及计算的工作负载分开。
 
-我们的治疗灵感来自[Mark Harris 的高效矩阵转置教程](https://developer.nvidia.com/blog/efficient-matrix-transpose-cuda-cc/)，我们建议深入讨论矩阵转置问题，该问题不直接涉及我们在这里使用的 CuTe 的抽象。相反，我们的教程也可以作为已经熟悉哈里斯教程的读者对这些抽象的介绍。无论如何，在解释如何使用 CuTe 实现相应的优化解决方案之前，我们将回顾该教程中的关键思想。
+我们的写作灵感来自[Mark Harris 的高效矩阵转置教程](https://developer.nvidia.com/blog/efficient-matrix-transpose-cuda-cc/)，我们建议深入讨论矩阵转置问题，该问题不直接涉及我们在这里使用的 CuTe 的抽象。相反，我们的教程也可以作为已经熟悉哈里斯教程的读者对这些抽象的介绍。无论如何，在解释如何使用 CuTe 实现相应的优化解决方案之前，我们将回顾该教程中的关键思想。
 
 ## 合并访问的审查：
 
@@ -27,7 +27,7 @@ english_markdown: "articles-en/tutorial-matrix-transpose-in-cutlass.en.md"
 
 出于我们讨论的目的，GPU 存储器层次结构具有三个可编程级别。从最高到最低级别，我们有全局内存、共享内存和寄存器内存。
 
-这*全局记忆*（GMEM），i.e。*高带宽内存*(HBM) 是三者中最大的，也是读取或写入最慢的。例如，NVIDIA H100 Tensor Core GPU 有 80 个 GB 的 GMEM。此处的跨步访问将对性能产生最严重的影响。
+这*全局记忆*（GMEM），即*高带宽内存*(HBM) 是三者中最大的，也是读取或写入最慢的。例如，NVIDIA H100 Tensor Core GPU 有 80 个 GB 的 GMEM。此处的跨步访问将对性能产生最严重的影响。
 
 接下来是*共享内存*(SMEM)，它比 GMEM 小得多，但速度快得多。例如，NVIDIA H100 Tensor Core GPU 每个流多处理器 (SM) 最多具有 228KB 的 SMEM。对于更熟悉内存架构的读者，我们注意到 SMEM 是从 L1 缓存中物理划分出来的。SMEM 在同一协作线程数组 (CTA) 内的所有线程之间共享，并且每个 CTA 在其自己的 SMEM 段内运行。这里的跨步访问仍然不是最优的，但比 GMEM 中的跨步访问要好得多。
 
@@ -86,7 +86,7 @@ Tensor tiled_tensor_DT = tiled_divide(tensor_DT, block_shape); // ([b,b], m/b, n
 
 在这里，我们将分块大小指定为 32 x 32。分块大小的值是一个重要的调整参数，应针对每个特定工作负载进行调整。事实上，32 x 32 并不是转置内核的最佳值，我们将在基准测试之前对其进行调整。
 
-`tiled_divide`创建一个具有相同数据但不同布局 i.e. 的张量，即不同的数据视图。 在我们的例子中，对于`tensor_S`我们从一个大小为 2D 的矩阵开始`(M, N)`. `cute::tiled_divide`瓷砖尺寸为`b`生成大小为 3D 的矩阵视图`([b,b], M/b, N/b)`; `b`经过`b`矩阵在一个`M/b`经过`N/b`网格。
+`tiled_divide`创建一个具有相同数据但不同布局 即 的张量，即不同的数据视图。 在我们的例子中，对于`tensor_S`我们从一个大小为 2D 的矩阵开始`(M, N)`. `cute::tiled_divide`tile尺寸为`b`生成大小为 3D 的矩阵视图`([b,b], M/b, N/b)`; `b`经过`b`矩阵在一个`M/b`经过`N/b`网格。
 
 此视图使得在内核内部访问正确的tile变得更加容易。
 

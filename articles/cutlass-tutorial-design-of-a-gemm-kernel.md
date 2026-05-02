@@ -215,17 +215,17 @@ if (params_.is_leader) {
 
 ### warp specialization
 
-在多级内核中，每个 warp 都承担生产者和消费者的角色。两个角色之间的切换是使用`PipelineState`抽象，并且 TMA 加载的异步性允许两种类型的操作重叠。另一种策略，*warp专业化*，为不同的扭曲分配不同的角色，这样我们就有*生产者扭曲*完全致力于内存复制和*消费者扭曲*完全致力于计算。如上所述，warp 调度程序可以通过在两种类型的 warp 之间切换来隐藏延迟。请注意，与多级内核不同，warp specialization本质上并不依赖于*异步*但在实践中仍然受益匪浅。
+在多级内核中，每个 warp 都承担生产者和消费者的角色。两个角色之间的切换是使用`PipelineState`抽象，并且 TMA 加载的异步性允许两种类型的操作重叠。另一种策略，*warp专业化*，为不同的warp分配不同的角色，这样我们就有*生产者warp*完全致力于内存复制和*消费者warp*完全致力于计算。如上所述，warp 调度程序可以通过在两种类型的 warp 之间切换来隐藏延迟。请注意，与多级内核不同，warp specialization本质上并不依赖于*异步*但在实践中仍然受益匪浅。
 
-特别是对于我们的 GEMM，生产者扭曲使用 TMA 将数据从全局内存加载到共享内存，而消费者扭曲使用 WGMMA 计算分片 GEMM。值得注意的是，在我们的简化设置中，两种类型的 warp 中的执行流程都是内部串行的，i.e。TMA 和 WGMMA 指令本身并不重叠*内部*-warpgroup。然而，还有更复杂的内核调度，它们利用 TMA 和 WGMMA 的异步性来实现与其他指令的warpgroup内重叠，例如[FlashAttention-3](https://research.colfax-intl.com/flashattention-3-fast-and-accurate-attention-with-asynchrony-and-low-precision/).
+特别是对于我们的 GEMM，生产者warp使用 TMA 将数据从全局内存加载到共享内存，而消费者warp使用 WGMMA 计算分片 GEMM。值得注意的是，在我们的简化设置中，两种类型的 warp 中的执行流程都是内部串行的，即TMA 和 WGMMA 指令本身并不重叠*内部*-warpgroup。然而，还有更复杂的内核调度，它们利用 TMA 和 WGMMA 的异步性来实现与其他指令的warpgroup内重叠，例如[FlashAttention-3](https://research.colfax-intl.com/flashattention-3-fast-and-accurate-attention-with-asynchrony-and-low-precision/).
 
 对于 Hopper 架构来说，warp specialization是一个特别有吸引力的主张，原因有以下三个：
 
 - **TMA**与早期的复制操作相比，寄存器密集度较低。
-- **WGMMA**可以从共享内存中获取其操作数，这意味着消费者扭曲不必执行自己的内存加载操作。
-- Hopper允许手动**warpgroup 范围内的寄存器（取消）分配**通过`setmaxnreg`操作说明。因此，可以将更大部分的寄存器分配给通常需要更多寄存器的消费者扭曲。
+- **WGMMA**可以从共享内存中获取其操作数，这意味着消费者warp不必执行自己的内存加载操作。
+- Hopper允许手动**warpgroup 范围内的寄存器（取消）分配**通过`setmaxnreg`操作说明。因此，可以将更大部分的寄存器分配给通常需要更多寄存器的消费者warp。
 
-为了扩展最后一个要点，每个 SM 都有一组有限的寄存器，并且在 Hopper 之前的架构中，每个 warp 在内核启动时都被分配了固定的、相同数量的寄存器。这对于多级管道来说很好，其中每个扭曲都做相同的工作，但对于warp specialization模式来说通常是浪费：生产者扭曲（仅加载数据）通常比消费者扭曲（执行数学）需要更少的寄存器，特别是在使用 TMA 时。对于寄存器密集型的工作负载，能够利用浪费的寄存器可能意味着允许每个 SM 有更多的扭曲或避免寄存器溢出。
+为了扩展最后一个要点，每个 SM 都有一组有限的寄存器，并且在 Hopper 之前的架构中，每个 warp 在内核启动时都被分配了固定的、相同数量的寄存器。这对于多级管道来说很好，其中每个warp都做相同的工作，但对于warp specialization模式来说通常是浪费：生产者warp（仅加载数据）通常比消费者warp（执行数学）需要更少的寄存器，特别是在使用 TMA 时。对于寄存器密集型的工作负载，能够利用浪费的寄存器可能意味着允许每个 SM 有更多的warp或避免寄存器溢出。
 
 现在让我们展示一段warp specialization代码。和以前一样，`Pipeline`类抽象了设置 warp 专用内核的复杂性。
 
@@ -261,9 +261,9 @@ else {
 }
 ```
 
-该格式类似于我们之前讨论的基本管道，但这次有一个外部条件，将工作负载分为生产者扭曲和消费者扭曲。尾声属于消费者扭曲，因为它涉及写出消费者线程寄存器中保存的累加器。
+该格式类似于我们之前讨论的基本管道，但这次有一个外部条件，将工作负载分为生产者warp和消费者warp。尾声属于消费者warp，因为它涉及写出消费者线程寄存器中保存的累加器。
 
-要查看线程位于哪个扭曲和warpgroup中，我们可以执行以下操作。
+要查看线程位于哪个warp和warpgroup中，我们可以执行以下操作。
 
 ```
 
@@ -272,7 +272,7 @@ int warp_idx_in_warpgroup = __shfl_sync(0xffffffff, (threadIdx.x / 32) % 4, 0);
 int warp_group_thread_idx = threadIdx.x % 128;
 ```
 
-上面的代码片段还使用了`__shfl_sync`操作，这是一个值的扭曲范围广播（更多信息[这里](https://developer.nvidia.com/blog/using-cuda-warp-level-primitives/)）。这是为了确保经线中的所有线程都获得相同的值。
+上面的代码片段还使用了`__shfl_sync`操作，这是一个值的warp范围广播（更多信息[这里](https://developer.nvidia.com/blog/using-cuda-warp-level-primitives/)）。这是为了确保经线中的所有线程都获得相同的值。
 
 现在让我们重点关注这如何应用于 GEMM。在[第 1 部分](https://research.colfax-intl.com/cutlass-tutorial-wgmma-hopper/)在本系列中，我们讨论了在 warpgroup 级别组织的 WGMMA 指令。因此，我们还在 warpgroup 级别组织生产者和消费者。我们使用TMA管道，这样我们就可以在生产者端使用TMA。
 
@@ -339,13 +339,13 @@ if (warp_group_idx == producerWarpGroupId) {
 
 用于这些寄存器计数的确切数字取决于算法和硬件施加的约束。在Hopper架构中，一个线程最多可以拥有255个寄存器，并且`setmaxnreg`可以设置为 24 到 256（含）之间且为 8 的倍数的值。一般来说，对于 Hopper GEMM WS 内核，建议安排一个 CTA 占据整个 SM。因此，我们应该尝试选择寄存器计数，以便（a）将最小数量的寄存器分配给发布 TMA 的生产者 warpgroup，以及（b）整个寄存器文件大小[每个 SM 64K](https://docs.nvidia.com/cuda/hopper-tuning-guide/index.html#occupancy)被使用。例如，24/240/240 分割通常适用于 1 个生产者warpgroup和 2 个消费者warpgroup（这总计为 504 < 512，并且 512*128 = 64*1024），同样，32/160/160/160 分割将用于 1 个生产者和 3 个消费者warpgroup。另请注意，如果尝试分配的寄存器总数超过寄存器文件大小，则程序将崩溃。
 
-此外，我们必须确保只有*一*warpgroup 中的线程曾经调用 TMA。在我们的代码示例中，我们确保只有第一个扭曲涉及这个，以及使用选择的那个线程`elect_one_sync`，负责TMA的调用。此代码适用于 2 个warpgroup，但只需进行最小的更改即可将其用于更多数量的warpgroup和阶段。
+此外，我们必须确保只有*一*warpgroup 中的线程曾经调用 TMA。在我们的代码示例中，我们确保只有第一个warp涉及这个，以及使用选择的那个线程`elect_one_sync`，负责TMA的调用。此代码适用于 2 个warpgroup，但只需进行最小的更改即可将其用于更多数量的warpgroup和阶段。
 
 应通过仔细分析内核来选择要使用的 warpgroup 和阶段的数量。作为两者的一般经验法则，更多的阶段和更多的warpgroup意味着更多的并行和重叠机会，但也使用更多的资源。特别是，使用更多的阶段需要更多的 SMEM 用于缓冲区，并且使用更多的warpgroup会增加寄存器压力。
 
 ## 表现
 
-我们使用的是CUTLASS[Hopper GEMM 教程代码](https://github.com/NVIDIA/cutlass/blob/main/examples/cute/tutorial/wgmma_sm90.cu)作为具有半精度 (FP16) 数据类型的多级和扭曲专用 GEMM 内核的基础。我们还修改了代码以适应 FP32 累积并使用 TMA 存储写出输出。然后，我们将两个版本调整为 MxNxK = 8192x8192x8192，并为 FP16 累积和 FP32 累积选择不同的tile 大小。我们选择的tile 大小和阶段数如下（bMxbNxbK 除以 MxNxK）：
+我们使用的是CUTLASS[Hopper GEMM 教程代码](https://github.com/NVIDIA/cutlass/blob/main/examples/cute/tutorial/wgmma_sm90.cu)作为具有半精度 (FP16) 数据类型的多级和warp专用 GEMM 内核的基础。我们还修改了代码以适应 FP32 累积并使用 TMA 存储写出输出。然后，我们将两个版本调整为 MxNxK = 8192x8192x8192，并为 FP16 累积和 FP32 累积选择不同的tile 大小。我们选择的tile 大小和阶段数如下（bMxbNxbK 除以 MxNxK）：
 
 - FP16 累积：bM = 256，bN = 256，bK = 96，2 个阶段，4 个 MMA warpgroup。簇大小 (1, 2, 1)。
 - FP32 累积：bM = 256，bN = 192，bK = 128，2 个阶段，2 个 MMA warpgroup。簇大小 (1, 2, 1)。
@@ -410,10 +410,10 @@ ptxas info    : Used 168 registers
 
 在本文中，我们全面介绍了流水线技术。我们介绍了它通过重叠内存复制和数学运算来隐藏延迟的目标，以及为什么这对于良好的性能至关重要。然后我们提出了两种流水线设计：
 
-- **多级：**使用异步复制屏蔽数据传输（Hopper 上的 TMA 或`cp.async`安培）加载下一组数据，同时对当前组进行计算。扭曲同时扮演生产者和消费者的角色。
+- **多级：**使用异步复制屏蔽数据传输（Hopper 上的 TMA 或`cp.async`安培）加载下一组数据，同时对当前组进行计算。warp同时扮演生产者和消费者的角色。
 - **warp specialization：**将warp specialization为生产者和消费者，并让它们同时运行。另外，生产者或消费者操作可以是异步的（Hopper 上的 例如，TMA 和 WGMMA）。
 
-我们详细介绍了如何使用 CUTLASS Pipeline 类来管理在 Hopper GEMM 内核中实现两种流水线策略所需的同步逻辑。最后，我们以 GEMM 为例对两种类型的管道进行了比较。尽管两者在我们的简化设置中表现大致相同，但实际上，性能最佳的 Hopper GEMM 内核使用warp specialization（例如，如[CUTLASS 轮廓仪](https://github.com/NVIDIA/cutlass/blob/main/media/docs/profiler.md)).
+我们详细介绍了如何使用 CUTLASS Pipeline 类来管理在 Hopper GEMM 内核中实现两种流水线策略所需的同步逻辑。最后，我们以 GEMM 为例对两种类型的管道进行了比较。尽管两者在我们的简化设置中表现大致相同，但实际上，性能最佳的 Hopper GEMM 内核使用warp specialization（例如，如[CUTLASS Profiler](https://github.com/NVIDIA/cutlass/blob/main/media/docs/profiler.md)).
 
 在本教程的第 3 部分中，我们将讨论调度整个内核的策略，包括threadblock rasterization、persistent kernel，以及最后一项称为[Stream-K GEMM](https://arxiv.org/abs/2301.03598).
 
@@ -421,7 +421,7 @@ ptxas info    : Used 168 registers
 
 在本文的主要部分中，我们讨论了使用 TMA 进行内存传输和 WGMMA 进行计算的流水线。这两个功能都是通过 Hopper 架构引入的（`sm90`），因此它们不适用于较旧的架构。在旧架构中实现类似的范例需要一些额外的步骤。因此，为了完整起见，我们还讨论了如何在 Ampere 架构中实现 GEMM 的流水线（`sm80`）。具体来说，我们研究了[CUTLASS 示例](https://github.com/NVIDIA/cutlass/blob/main/examples/cute/tutorial/sgemm_sm80.cu)为了`sm80`。与代码相比`sm90`我们在为 Ampere 撰写的文章中介绍了两个复杂情况：
 
-- Ampere具有从GMEM加载到SMEM的异步指令（`cp.async`），但没有对寄存器分配进行特定于 warp 的控制。这阻止了我们使用warp specialization，并鼓励我们编写一个多级管道，其中每个扭曲同时扮演生产者和消费者的角色。
+- Ampere具有从GMEM加载到SMEM的异步指令（`cp.async`），但没有对寄存器分配进行特定于 warp 的控制。这阻止了我们使用warp specialization，并鼓励我们编写一个多级管道，其中每个warp同时扮演生产者和消费者的角色。
 - 与 WGMMA 不同，WGMMA 可以直接从 SMEM 获取其操作数，此处 MMA 操作数必须从寄存器 (RMEM) 加载。因此，在 MMA 运行之前，需要进一步的指令从 SMEM 加载到 RMEM。此外，我们还可以将 SMEM 传输到 RMEM 负载，以潜在地提高性能，这会给整体设计带来额外的复杂性。
 
 ![图 3.Ampere GEMM 通过两个嵌套管道隐藏延迟。图片来自 CUTLASS 文档。](../images/cutlass-tutorial-design-of-a-gemm-kernel/software-pipeline-9ffc9c4753.png)

@@ -79,7 +79,7 @@ NVIDIA GPU 支持五种基本浮点数据类型，大小最多为 1 字节：
 
 **图 1.**SMEM 中的 4 位和 6 位数据类型打包，来自[PTX 文档](https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-packing-formats-mxf8f6f4-smem).
 
-结果之一是为子字节操作数分配 SMEM 空间，就好像它们是字节操作数一样（这是允许动态传递数据类型的一部分）。不支持 SMEM 中完全压缩的连续数据`.kind::f8f6f4`预选赛。当我们在下一篇文章中讨论块扩展时，我们将讨论`mxf4`类型确实支持打包的 SMEM 格式。
+结果之一是为子字节操作数分配 SMEM 空间，就好像它们是字节操作数一样（这是允许动态传递数据类型的一部分）。不支持 SMEM 中完全压缩的连续数据`.kind::f8f6f4`限定符。当我们在下一篇文章中讨论块扩展时，我们将讨论`mxf4`类型确实支持打包的 SMEM 格式。
 
 SMEM 中的操作数块可能会使用 TMA 从 GMEM 加载。当然，可以用相同的填充格式在 GMEM 中定义操作数布局，但这会浪费大量 GMEM 空间和 TMA 带宽。鉴于低精度量化的部分目的是减少 GPU 内存中的模型大小，这是一个非常次优的解决方案。理想情况下，我们能够以打包格式将张量存储在 GMEM 中，并在加载到 SMEM 的过程中扩展到适当的填充格式。
 
@@ -102,7 +102,7 @@ TMA 负载的这些版本在 PTX 中对应于`cp.async.bulk.tensor`与数据类�
 - TMA 张量在连续方向上的大小（即，主维）必须是 128 个元素的倍数。
 - 仅支持 128B 混合模式，或不支持混合模式。*（h/t Together AI 的 Alex Angus 向我们指出了这一点！）*
 
-在CUTLASS中，可以使用[`sm1xx_gemm_is_aligned()`](https://github.com/NVIDIA/cutlass/blob/c2ad7c5b20f131c4ba33601860f1da3f9c9df0f3/include/cutlass/gemm/collective/builders/sm1xx_common.inl#L357)检查 GMEM 的对齐要求，以及`sm1xx_gemm_check_for_f8f6f4_mix8bit_requirement()`检查瓷砖尺寸要求。请注意，CUTLASS 实际上[断言](https://github.com/NVIDIA/cutlass/blob/c2ad7c5b20f131c4ba33601860f1da3f9c9df0f3/include/cutlass/detail/layout.hpp#L372)4 位数据应为 64 字节对齐，6 位数据应为 96 字节对齐，因为这可确保满足前导维度和基地址对齐约束。
+在CUTLASS中，可以使用[`sm1xx_gemm_is_aligned()`](https://github.com/NVIDIA/cutlass/blob/c2ad7c5b20f131c4ba33601860f1da3f9c9df0f3/include/cutlass/gemm/collective/builders/sm1xx_common.inl#L357)检查 GMEM 的对齐要求，以及`sm1xx_gemm_check_for_f8f6f4_mix8bit_requirement()`检查tile尺寸要求。请注意，CUTLASS 实际上[断言](https://github.com/NVIDIA/cutlass/blob/c2ad7c5b20f131c4ba33601860f1da3f9c9df0f3/include/cutlass/detail/layout.hpp#L372)4 位数据应为 64 字节对齐，6 位数据应为 96 字节对齐，因为这可确保满足前导维度和基地址对齐约束。
 
 最后，请注意，还有第三种用于子字节数据的 Tensor Map 数据类型，`CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B` (`.b4x16`（PTX），它将 GMEM 中的打包 4 位数据复制到 SMEM 中的打包、未填充格式。这对我们来说没有用，但对于可以使用这种打包格式的 UMMA 的仅 FP4 版本很有用。
 

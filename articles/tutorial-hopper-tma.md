@@ -21,7 +21,7 @@ TMA (Tensor Memory Accelerator) 是 NVIDIA Hopper™ 架构中引入的一项新
 
 另外，考虑到 TMA 是一个异步操作（在[异步代理](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#async-proxy)），我们需要使用某些内存一致性强制工具，例如异步内存屏障（即，[`mbarrier`](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-mbarrier)) 和异步内存栅栏 (即，[`fence.proxy.async`](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-membar-fence)），以确保内核的正确行为。同步本身就是一个广泛讨论的话题，因此我们只会在实际使用所需的范围内介绍这些概念。
 
-最后，对于正在寻找涵盖许多相同点但未提及 CUTLASS 或 CuTe 概念的资源的读者，我们建议[TMA的治疗](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#tensor-memory-access)在 CUDA® 编程指南中。
+最后，对于正在寻找涵盖许多相同点但未提及 CUTLASS 或 CuTe 概念的资源的读者，我们建议[TMA 的讲解](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#tensor-memory-access)在 CUDA® 编程指南中。
 
 ## TMA 负载
 
@@ -31,7 +31,7 @@ TMA 将数据从 GMEM 加载复制到 SMEM。在本节中，我们演示如何�
 
 为了演示 TMA 负载的用法，我们考虑平铺 2D 行主矩阵的简单任务。我们给定一个矩阵`A`形状的`[m,n]`和两个正整数`CTA_M`和`CTA_N`。注意`CTA_M`和`CTA_N`在编译时已知，而`m`和`n`在运行时通过矩阵给我们`A`。为了简单起见，我们还假设`m % CTA_M == n % CTA_N == 0`，尽管我们稍后会看到这个要求可以放宽。
 
-我们推出了具有尺寸的 CTA 网格`{m/CTA_M, n/CTA_N, 1}`，其中 SMEM`(i,j)`-th CTA 持有`(i,j)`第一个具有形状的瓷砖`[CTA_M, CTA_N]`从`A`。我们可以在中描述这个任务`numpy`伪代码为：
+我们推出了具有尺寸的 CTA 网格`{m/CTA_M, n/CTA_N, 1}`，其中 SMEM`(i,j)`-th CTA 持有`(i,j)`第一个具有形状的tile`[CTA_M, CTA_N]`从`A`。我们可以在中描述这个任务`numpy`伪代码为：
 
 ```
 
@@ -72,7 +72,7 @@ void host_fn(T* data, int M, int N) {
 }
 ```
 
-创造的线条`gmem_layout`, `gmem_tensor`， 和`smem_tensor`只需使用基本的 CuTE 概念，因此我们建议读者参考[这些](https://github.com/NVIDIA/cutlass/blob/637b15906358191cb4238af419d408a65819d7ec/media/docs/cute/01_layout.md) [CuTe](https://github.com/NVIDIA/cutlass/blob/637b15906358191cb4238af419d408a65819d7ec/media/docs/cute/02_layout_algebra.md) [教程](https://github.com/NVIDIA/cutlass/blob/637b15906358191cb4238af419d408a65819d7ec/media/docs/cute/03_tensor.md)刷新记忆。这里我们重点讲解的是`tma_load`目的。该对象是一个实例`cute::TiledCopy`，它保存信息并实现执行 CTA 范围复制操作的方法。在代码片段中，`tma_load`对象是通过创建的[这个明确的默认值](https://github.com/NVIDIA/cutlass/blob/637b15906358191cb4238af419d408a65819d7ec/include/cute/atom/copy_traits_sm90_tma.hpp#L1206-L1217)的`cute::make_tma_copy`功能。这个函数的完整实现有一些细微差别，我们将在讨论时深入探讨`MULTICAST`在本博客文章的后面，但显式默认值足以满足大多数用例，例如我们的示例任务。我们建议使用显式默认值以避免不必要的复杂化（和错误）。
+这里的 `gmem_layout`、`gmem_tensor` 和 `smem_tensor` 仅用到了 CuTe 的基础概念，读者可先参考这些 [CuTe 教程 1](https://github.com/NVIDIA/cutlass/blob/637b15906358191cb4238af419d408a65819d7ec/media/docs/cute/01_layout.md)、[教程 2](https://github.com/NVIDIA/cutlass/blob/637b15906358191cb4238af419d408a65819d7ec/media/docs/cute/02_layout_algebra.md)、[教程 3](https://github.com/NVIDIA/cutlass/blob/637b15906358191cb4238af419d408a65819d7ec/media/docs/cute/03_tensor.md)。这里的重点是 `tma_load` 对象：它是一个 `cute::TiledCopy` 实例，保存了执行 CTA 范围 copy 所需的信息与方法。示例中，`tma_load` 是通过 `cute::make_tma_copy` 的[显式默认配置](https://github.com/NVIDIA/cutlass/blob/637b15906358191cb4238af419d408a65819d7ec/include/cute/atom/copy_traits_sm90_tma.hpp#L1206-L1217)构造的。虽然该函数完整实现还有一些细节（本文后面讨论 `MULTICAST` 时会展开），但显式默认值已覆盖大多数场景，也更不容易出错。
 
 让我们看看我们使用的签名`make_tma_copy`:
 
@@ -120,7 +120,7 @@ void tma_load_kernel(__grid_constant__ const TmaLoad tma_load, GmemTensor gmem_t
 }
 ```
 
-首先，在第 2 行，`tma_load`内核的参数必须用 __ 注释`grid_constant__ const`。如果我们有两个张量想要从 GMEM 复制到 SMEM，*每个*其中必须有自己的`TiledCopy`实例，并且每个实例必须是 __`grid_constant__ const`。这是通过考试的要求`cuTensorMap`如记录的那样从主机到设备[这里](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#asynchronous-data-copies-using-tensor-memory-access-tma)， 例如。
+首先，在第 2 行，`tma_load`内核的参数必须用 __ 注释`grid_constant__ const`。如果我们有两个张量想要从 GMEM 复制到 SMEM，*每个*其中必须有自己的`TiledCopy`实例，并且每个实例必须是 __`grid_constant__ const`。这是传递的要求`cuTensorMap`如记录的那样从主机到设备[这里](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#asynchronous-data-copies-using-tensor-memory-access-tma)， 例如。
 
 下一个重要的一点是，对于 TMA 副本，只有一个线程负责发出 TMA 操作。在代码片段中，所有与TMA相关的变量和指令都包含在`if`从第 12 行开始的块，仅由线程 0 执行。另一方面，第 30 行包含 CTA 中所有线程等待 TMA 操作完成的指令。
 
@@ -140,7 +140,7 @@ if (cute::thread(0)) { cute::print(gmem_tensor_coord); }
 ArithTuple(_0,_0) o (1024,1024):(_1@1,_1@0)
 ```
 
-对于熟悉 CuTe 中平铺复制工作方式的读者来说，第 15-18 行是不言自明的，其中 GMEM 张量被平铺为更小的分区，每个 CTA 根据块坐标切片到平铺张量中以获得其 GMEM 视图。但请注意，分区适用于上述`ArithTuple`代表坐标`gmem_tensor`，而不是`gmem_tensor`本身。特别是，`ArithTuple`被分割成形状的瓷砖`[CTA_M,CTA_N]`，然后每个 CTA 获取其tile。
+对于熟悉 CuTe 中平铺复制工作方式的读者来说，第 15-18 行是不言自明的，其中 GMEM 张量被平铺为更小的分区，每个 CTA 根据块坐标切片到平铺张量中以获得其 GMEM 视图。但请注意，分区适用于上述`ArithTuple`代表坐标`gmem_tensor`，而不是`gmem_tensor`本身。特别是，`ArithTuple`被分割成形状的tile`[CTA_M,CTA_N]`，然后每个 CTA 获取其tile。
 
 如果我们打印`gmem_tensor_coord_cta`使用`print_tensor`如下：
 
@@ -256,7 +256,7 @@ TMA 加载和存储代码之间最重要的区别是我们不再看到任何 mba
 
 内存栅栏的目的是在栅栏之前和之后执行线程请求的内存访问之间建立有保证的顺序。在我们的示例中，我们需要确保第 29-32 行中完成的所有对 SMEM 的写入对于线程 0 执行的 TMA 存储可见。为此，在第 35 行我们有 CuTe 方法`tma_store_fence()`包装 PTX 指令`fence.proxy.async.shared::cta`.
 
-该指令包含两个重要的限定词来描述栅栏的效果：*范围*和*代理类*。这[范围](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#scope)指示参与栅栏强制排序的线程集。在我们的例子中，预选赛`cta`定义 CTA 中所有线程给定的范围（这是内存一致性模型的最小可能范围）。这[代理类](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#proxies)指示除了通用代理之外，将参与栅栏强制执行的排序的代理类型。在我们的例子中，我们选择代理类型为`async.shared`因为 TMA 存储是在异步代理中执行的（相对于每个 CTA）。如果我们用不同的内存栅栏原语替换异步栅栏，例如`__threadfence_block()`如果不涉及异步代理，我们将破坏内核正确行为所需的保证，从而导致实践中的竞争条件。
+该指令包含两个重要的限定词来描述栅栏的效果：*范围*和*代理类*。这[范围](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#scope)指示参与栅栏强制排序的线程集。在我们的例子中，限定符`cta`定义 CTA 中所有线程给定的范围（这是内存一致性模型的最小可能范围）。这[代理类](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#proxies)指示除了通用代理之外，将参与栅栏强制执行的排序的代理类型。在我们的例子中，我们选择代理类型为`async.shared`因为 TMA 存储是在异步代理中执行的（相对于每个 CTA）。如果我们用不同的内存栅栏原语替换异步栅栏，例如`__threadfence_block()`如果不涉及异步代理，我们将破坏内核正确行为所需的保证，从而导致实践中的竞争条件。
 
 ##### TMA STORE ARRIVE AND WAIT
 
@@ -511,7 +511,7 @@ Copy_Atom
   ValueType:    32b
 ```
 
-它有两个“线程”对应集群中的两个CTA，偏移位置由逻辑坐标给出`(8,0)`在`(16,16)`瓷砖用于`ctaid` 1.
+它有两个“线程”对应集群中的两个CTA，偏移位置由逻辑坐标给出`(8,0)`在`(16,16)`tile用于`ctaid` 1.
 
 ## 结论
 

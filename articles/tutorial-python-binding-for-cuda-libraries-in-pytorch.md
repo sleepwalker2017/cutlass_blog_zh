@@ -176,7 +176,7 @@ bool is_cuda = A.device().is_cuda();
 
 喜欢PyTorch的`mm`，我们的函数将返回`C`张量返回到 PyTorch 以便在那里使用。我们还需要更新函数参数来标记`C`作为可选的。 Torch C++ API 提供了一个实用程序`c10::optional<torch::Tensor>`以便将 Tensor 参数指定为可选。有了这个，我们可以检查输入是否是通过`.has_value()`方法。如果这返回`true`，然后我们可以得到这个值`.value()`方法。
 
-如果`.has_value()`回报`false`，那么我们需要创建一个新的张量。 ATen 有很多创建张量的选项，这些选项都有记录[这里](https://pytorch.org/cppdocs/notes/tensor_creation.html)。出于我们的目的，我们只需要一个空张量。结合起来，我们得到：
+如果`.has_value()`返回`false`，那么我们需要创建一个新的张量。 ATen 有很多创建张量的选项，这些选项都有记录[这里](https://pytorch.org/cppdocs/notes/tensor_creation.html)。出于我们的目的，我们只需要一个空张量。结合起来，我们得到：
 
 ```
 
@@ -275,7 +275,7 @@ torch::Tensor cutlass_gemm(torch::Tensor A,  // A matrix (m x k)
 }
 ```
 
-在此代码中，我们采用了一种临时方法来处理基于数据类型分派到适当模板化函数所需的条件逻辑。`A`和`C`。显然，这不能很好地扩展到大量模板参数。有关如何使用 Python 脚本来处理为高度模板化的 ZXQPH3ZXQ/ZXQPH2ZXQ 函数（如 CUTLASS 中的函数）编写包装器的示例，我们建议查看[_python_gemm](https://github.com/NVIDIA/cutlass/blob/main/python/cutlass/emit/pytorch.py#L704)方法和[EmitGemmUniversalInstance3x](https://github.com/NVIDIA/cutlass/blob/main/python/cutlass/backend/gemm_operation.py#L1195)CUTLASS 库中的类。
+在此代码中，我们采用了一种临时方法来处理基于数据类型分派到适当模板化函数所需的条件逻辑。`A`和`C`。显然，这不能很好地扩展到大量模板参数。有关如何使用 Python 脚本来处理为高度模板化的 CuTe/CUTLASS 函数（如 CUTLASS 中的函数）编写包装器的示例，我们建议查看[_python_gemm](https://github.com/NVIDIA/cutlass/blob/main/python/cutlass/emit/pytorch.py#L704)方法和[EmitGemmUniversalInstance3x](https://github.com/NVIDIA/cutlass/blob/main/python/cutlass/backend/gemm_operation.py#L1195)CUTLASS 库中的类。
 
 ## 绑定与编译
 
@@ -388,6 +388,6 @@ PyTorch有一个功能叫做[自动混合精度（AMP）](https://pytorch.org/do
 
 在本文中，我们的重点是编写可与 PyTorch 一起使用的扩展。为此，我们使用了`setuptools`作为与 PyTorch 结合的构建后端`CUDAExtension`实用类。然而，这将 PyTorch 添加为我们的扩展的依赖项，如果扩展不是为 PyTorch 开发的，这可能并不理想。可以使用`setuptools`无需依赖`CUDAExtension`。 有关示例，请参阅 python 安装[CUTLASS](https://github.com/NVIDIA/cutlass/tree/main).
 
-此外，还有其他兼容的构建后端`nvcc`可用于创建基于 C/ZXQPH1ZXQ 的 Python 扩展。例如，[scikit 构建核心](https://github.com/scikit-build/scikit-build-core)是一个基于 cmake 的后端，可以用来代替`setuptools`。 有使用指南`nvcc`在`cmake`于[Nvidia 开发者论坛](https://developer.nvidia.com/blog/building-cuda-applications-cmake/).
+此外，还有其他兼容的构建后端`nvcc`可用于创建基于 C/CuTe 的 Python 扩展。例如，[scikit 构建核心](https://github.com/scikit-build/scikit-build-core)是一个基于 cmake 的后端，可以用来代替`setuptools`。 有使用指南`nvcc`在`cmake`于[Nvidia 开发者论坛](https://developer.nvidia.com/blog/building-cuda-applications-cmake/).
 
 最后一点，构建后端通常在`pyproject.toml`然后由 python 打包软件使用的文件。详细信息`pyproject.toml`和它的用法可以找到[这里](https://packaging.python.org/en/latest/guides/writing-pyproject-toml/).

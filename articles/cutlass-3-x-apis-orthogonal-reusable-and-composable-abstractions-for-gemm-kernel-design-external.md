@@ -68,7 +68,7 @@ using GemmHandle = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
 
 ## 集体层：Mainloop[https://developer.nvidia.com/blog/cutlass-3-x-orthogonal-reusable-and-composable-abstractions-for-gemm-kernel-design/#collective_layer_mainloop](https://developer.nvidia.com/blog/cutlass-3-x-orthogonal-reusable-and-composable-abstractions-for-gemm-kernel-design/#collective_layer_mainloop)
 
-一个**集体**是一组相互协作执行工作的线程，并且可以并行重复以形成整个内核。一般来说，这是一个线程块或集群。TiledMMA 和 TiledCopy 对象描述并行工作器的空间分配以计算和复制工作（e.g、扭曲、warpgroup，甚至 Blackwell MMA 的线程块），而 Collective 层则负责通过设置管道和warp specialization方案以及使用硬件加速同步原语来管理管道和异步操作来临时组织这项工作。
+一个**集体**是一组相互协作执行工作的线程，并且可以并行重复以形成整个内核。一般来说，这是一个线程块或集群。TiledMMA 和 TiledCopy 对象描述并行工作器的空间分配以计算和复制工作（e.g、warp、warpgroup，甚至 Blackwell MMA 的线程块），而 Collective 层则负责通过设置管道和warp specialization方案以及使用硬件加速同步原语来管理管道和异步操作来临时组织这项工作。
 CUTLASS 3.x GEMM 内核包含**集体主循环**，一个实例[GEMM](https://github.com/NVIDIA/cutlass/blob/b78588d1630aa6643bf021613717bafb705df4ef/include/cutlass/gemm/collective/collective_mma_decl.hpp)类模板定义了由单个集合执行的单个主循环迭代的基本成分，最重要的是加载和 MMA 过程。集体主循环可以这样定义：
 
 ```
@@ -113,7 +113,7 @@ using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilder
 
 - **建筑学专业：**GPU 架构和 MMA 运算符的类型（例如，SIMT 或 Tensor Core）。
 - **操作数和累加器信息：**操作数和累加器的数据类型，以及全局内存中操作数的对齐和编译时布局信息（例如，行优先或列优先）。
-- **瓷砖形状：**用于推导TiledMma和TiledCopy对象以及SMEM布局。
+- **tile形状：**用于推导TiledMma和TiledCopy对象以及SMEM布局。
 - **日程安排信息：**调度算法使用集群形状、管道阶段计数和内核调度。阶段计数和内核调度参数有默认的“自动”选项，它告诉 CUTLASS 尝试自动为给定的架构和参数选择最佳的选项。
 
 ## 集体层：结语[https://developer.nvidia.com/blog/cutlass-3-x-orthogonal-reusable-and-composable-abstractions-for-gemm-kernel-design/#collective_layer_epilogue](https://developer.nvidia.com/blog/cutlass-3-x-orthogonal-reusable-and-composable-abstractions-for-gemm-kernel-design/#collective_layer_epilogue)
@@ -175,16 +175,16 @@ using GemmKernel = cutlass::gemm::kernel::GemmUniversal<
 的实例化`GemmUniversal`在以下形式的文件中找到`cutlass/gemm/kernel/sm*_gemm_*.hpp`， 和`GemmUniversal`主要是根据调度`KernelSchedule`集体主循环的参数。所有实例化都呈现一致的接口：
 
 - 用于将参数传递给内核的接口，包括问题形状、有关硬件的信息、张量的指针和布局以及尾声参数。
-- 静态初始化函数，用于获取网格和块尺寸，检查内核是否可在硬件上实现，并为尾声或tile调度程序所需的任何归约操作或全局屏障设置全局内存工作空间。
+- 静态初始化函数，用于获取网格和块尺寸，检查内核是否可在硬件上实现，并为尾声或tile 调度器所需的任何归约操作或全局屏障设置全局内存工作空间。
 - 最重要的是，它们将内核逻辑实现为`operator()`。这是一个*设备*函数——尽管内核层包含内核执行的所有逻辑，但它尚未公开从主机启动它的方法。
 
-例如，定义了 Blackwell 的 TMA 扭曲专用内核[这里](https://github.com/NVIDIA/cutlass/blob/62750a2b75c802660e4894434dc55e839f322277/include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp).
+例如，定义了 Blackwell 的 TMA warp专用内核[这里](https://github.com/NVIDIA/cutlass/blob/62750a2b75c802660e4894434dc55e839f322277/include/cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp).
 
 ## 平铺调度[https://developer.nvidia.com/blog/cutlass-3-x-orthogonal-reusable-and-composable-abstractions-for-gemm-kernel-design/#tile_scheduling](https://developer.nvidia.com/blog/cutlass-3-x-orthogonal-reusable-and-composable-abstractions-for-gemm-kernel-design/#tile_scheduling)
 
-内核层也是指定tile调度器的组成点。正如内核调度定义了集合内工作的时间组织一样，tile scheduler定义了集合之间工作的顺序和分配。对于最基本的tile scheduler，每个输出切片分配一个 CTA。 CUTLASS 3.x 为 Hopper 实现了两个额外的tile scheduler：**执着的**调度程序为每个 SM 启动一个 CTA 并具有每个 CTA (*潜在地*）在其生命周期内计算多个输出 tile——并且**Stream-K**调度程序，它也是持久的，但另外沿着 K 模式划分一些输出tile工作，以实现更好的负载平衡。在 Blackwell 架构上，人们使用调度器[集群启动控制](https://github.com/NVIDIA/cutlass/blob/main/media/docs/blackwell_cluster_launch_control.md)。有关切片调度的更深入信息，请参阅[这个科尔法克斯教程](https://research.colfax-intl.com/cutlass-tutorial-persistent-kernels-and-stream-k/).
+内核层也是指定tile调度器的组成点。正如内核调度定义了集合内工作的时间组织一样，tile 调度器定义了集合之间工作的顺序和分配。对于最基本的tile 调度器，每个输出切片分配一个 CTA。 CUTLASS 3.x 为 Hopper 实现了两个额外的tile 调度器：**执着的**调度程序为每个 SM 启动一个 CTA 并具有每个 CTA (*潜在地*）在其生命周期内计算多个输出 tile——并且**Stream-K**调度程序，它也是持久的，但另外沿着 K 模式划分一些输出tile工作，以实现更好的负载平衡。在 Blackwell 架构上，人们使用调度器[集群启动控制](https://github.com/NVIDIA/cutlass/blob/main/media/docs/blackwell_cluster_launch_control.md)。有关切片调度的更深入信息，请参阅[这个科尔法克斯教程](https://research.colfax-intl.com/cutlass-tutorial-persistent-kernels-and-stream-k/).
 
-我们可以扩展上面的内核以使用 Stream-K tile scheduler：
+我们可以扩展上面的内核以使用 Stream-K tile 调度器：
 
 ```
 
