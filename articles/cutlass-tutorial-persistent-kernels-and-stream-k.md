@@ -25,9 +25,9 @@ english_markdown: "articles-en/cutlass-tutorial-persistent-kernels-and-stream-k.
 
 考虑一种可被拆分成多个等大小 **work unit** 的计算，其中每个工作单元都可以由单个 SM 在相同时间内完成。例如，在 GEMM 中，常见做法是把计算划分成若干工作单元，每个工作单元负责一个 `bM x bN` 的输出 tile。随后，这些工作单元会被分配给 CTA（线程块），每个 CTA 在某个可用 SM 上执行自己对应的工作。我们把 work unit 在 SM 之间的分配方式称为**调度**。
 
-如果工作单元的数量超过了可用的SM的数量，那么工作单元将被分多次处理**波浪**，其中 1 波是每个可用的 SM 完成单个工作单元。
+如果工作单元的数量超过可用 SM 的数量，那么这些工作单元就会分成多轮来执行；这里的一轮通常称为一个 **wave**，表示每个可用 SM 各处理一个工作单元。
 
-**波量化**当工作单元的数量不能被可用 SM 的数量整除时，就会出现这种情况。例如，考虑有 10 个工作单元和 4 个 SM 的情况。那么工作单元执行时间线如下所示：
+当工作单元的数量不能被可用 SM 的数量整除时，就会出现 **wave quantization**。例如，考虑有 10 个工作单元和 4 个 SM 的情况，那么执行时间线如下所示：
 
 ![](../images/cutlass-tutorial-persistent-kernels-and-stream-k/quantization-953ed266c9.png)
 
@@ -45,14 +45,14 @@ english_markdown: "articles-en/cutlass-tutorial-persistent-kernels-and-stream-k.
 
 #### Persistent Kernel
 
-为了解决波量化问题，我们需要创建更好的分区和调度方案。到目前为止，我们在本博客中展示的内核已使用取决于问题维度的网格，以便每个 CTA 处理单个工作单元。例如，在 GEMM 中，work unit是`bMxbN`的瓷砖`MxN`输出矩阵，其中`bM`和`bN`在编译时是固定的。每个工作单元将由单个 CTA 计算`M/bM x N/bN`网格。所以我们的启动参数如下所示：
+为了解决 wave quantization，我们需要更好的分区与调度方案。到目前为止，本文展示的内核都使用依赖于问题维度的网格，使每个 CTA 只处理一个工作单元。在 GEMM 里，这个 work unit 通常就是 `MxN` 输出矩阵中的一个 `bM x bN` tile，其中 `bM` 和 `bN` 在编译期固定。于是，每个工作单元都对应网格中的一个 CTA，网格大小就是 `M/bM x N/bN`。对应的启动参数如下：
 
 ```
 
 dim3 dimGrid(ceil_div(M, bM), ceil_div(M, bN));
 ```
 
-这种方法的问题在于：虽然我们对线程块如何被分配到 SM 上有一定控制，但要实现更复杂的调度策略仍然很困难。因此，我们采用另一种设计方式：**persistent kernel**。在 persistent kernel 中，网格大小是固定的，通常就等于可用 SM 的数量，因此每个 CTA 基本上都会“常驻”在自己的 SM 上。可以用下面这段 CUDA 代码查询 SM 数量，并据此设置 `dimGrid`：
+这种方法的问题在于：虽然我们对线程块如何被分配到 SM 上有一定控制，但要实现更复杂的调度策略仍然比较困难。因此，我们采用另一种设计方式：**persistent kernel**。在 persistent kernel 中，网格大小是固定的，通常就等于可用 SM 的数量，因此每个 CTA 基本上都会“常驻”在自己的 SM 上。可以用下面这段 CUDA 代码查询 SM 数量，并据此设置 `dimGrid`：
 
 ```
 
@@ -66,7 +66,7 @@ dim3 dimGrid(num_SMs);
 
 在实践中，CTA 的 work unit 分配通常交给 **tile scheduler** 处理。它本质上是一个“增强版迭代器”，告诉每个 CTA 下一个 work unit 在哪里，以及何时停止。虽然每个输出 tile 的总工作量并没有改变，但通过更换 tile scheduler，我们就能探索更复杂的策略来尽量减少负载不平衡，例如 **Stream-K**。
 
-## 使用persistent kernel处理波量化
+## 使用 persistent kernel 处理波量化
 
 为了达到 Stream-K，研究一些更简单但效率低下的波量化方法也是很有用的。这[关于Stream-K的论文](https://arxiv.org/abs/2301.03598)对此有深入的讨论，我们建议阅读。为了方便读者，我们在这里对他们的讨论进行总结。
 
@@ -78,7 +78,7 @@ dim3 dimGrid(num_SMs);
 
 ![图 1：数据并行分区。](../images/cutlass-tutorial-persistent-kernels-and-stream-k/Split-MN-74a6c56c66.png)
 
-Figure 1 shows an example partition.这里，GEMM 工作负载被分为 9 个tile。由于工作项目相同，瓷砖会分批加工。具体来说，这 9 个tile将在 H10 的 4 个 SM 上分 3 波进行处理：2 个full wave，以及仅占用 4 个 SM 中的 1 个的partial wave。如果每个tile在其 SM 上实现 100% 利用率，则整个计算的利用率为 2.25/3 = 75%。
+图 1 展示了一个示例划分。这里，GEMM 工作负载被分为 9 个tile。由于工作项目相同，瓷砖会分批加工。具体来说，这 9 个tile将在 H10 的 4 个 SM 上分 3 波进行处理：2 个full wave，以及仅占用 4 个 SM 中的 1 个的partial wave。如果每个tile在其 SM 上实现 100% 利用率，则整个计算的利用率为 2.25/3 = 75%。
 
 最直接的方法是回到这样的认识：如果有更多的工作单元，波量化就不成问题——并且我们可以通过减小每个工作单元来增加工作单元的数量。
 
@@ -142,7 +142,7 @@ Stream-K 策略为每个 SM 分配一个单一的、持久的 CTA。每个 CTA �
 
 然而，stream-K内核引入了**倾斜**：由于每个 SM 首先计算不同大小的部分tile，因此它们往往会同时处理不同的 K 偏移量。回到图 4，SM 0 和 1 都在第 0 波波开始时使用来自 B0 的数据 — 但 SM0 需要其第 0 个 K 块，而 SM1 需要中间的数据。事实上，该调度中的 K 偏移量从未对齐，这使得缓存命中变得更加困难。总而言之，消除“波动”并调度不同的 SM 彼此不同步会导致缓存性能较差的隐性成本。
 
-我们可以通过将计算重新安排为persistent kernel和普通数据并行内核之间的混合来解决该问题。由于数据并行调度不会受到偏差的影响，因此尽可能长时间地使用此调度是有意义的，保留 Stream-K 只用于足够的tile来处理波量化效果。为了在 Stream-K 阶段正确平衡 SM 之间的工作负载，有必要向该阶段分配 1 个full wave和任何剩余的分波。
+我们可以通过将计算重新安排为persistent kernel 和 普通数据并行内核之间的混合来解决该问题。由于数据并行调度不会受到偏差的影响，因此尽可能长时间地使用此调度是有意义的，保留 Stream-K 只用于足够的tile来处理波量化效果。为了在 Stream-K 阶段正确平衡 SM 之间的工作负载，有必要向该阶段分配 1 个full wave和任何剩余的分波。
 
 该时间表如图 6 所示。初始 Stream-K 阶段在 1 到 2 个full wave计算之间进行处理。每个 SM 最多接收 2 个部分tile。根据设计，这些tile的总大小与 CTA 无关，因此所有 CTA 都希望大约在同一时间完成此阶段的计算。此阶段完成后，仅保留整个tile，并且剩余的数量可被 SM 的数量整除。因此，可以使用非持久的数据并行策略来计算这些tile，该策略不会受到波量化的影响，并且具有更好的缓存性能。如图 6 所示：
 
@@ -266,7 +266,7 @@ using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilder
   >::CollectiveOp;
 ```
 
-This GEMM kernel is now set up to use the Stream-K scheduler. An important note about the Stream-K scheduler is that it does not always use Stream-K partitioning.相反，默认情况下它将使用内部启发式来确定最佳分区方案。 CUTLASS 调度程序有四个定义的选项**分解模式**.
+这个 GEMM 内核现在已经配置为使用 Stream-K scheduler。 An important note about the Stream-K scheduler is that it does not always use Stream-K partitioning.相反，默认情况下它将使用内部启发式来确定最佳分区方案。 CUTLASS 调度程序有四个定义的选项**分解模式**.
 
 - `DataParallel`– K 方向无分裂。
 - `SplitK`– 使用用户定义的分割来实现 SplitK。
@@ -315,9 +315,9 @@ CUTLASS_CHECK(gemm.run());
 
 ![](../images/cutlass-tutorial-persistent-kernels-and-stream-k/m1024-no-heuristic-b28b6195df.png)
 
-The vertical dotted lines denote the wave boundaries. As expected, there is a sharp drop in performance for the DataParallel mode when going over wave boundaries.这就是波的量子化效应。The DataParallel mode matches or outperforms all other modes when the last wave is mostly full (tiles-per-SM is just under a whole integer), and underperforms when it is nearly empty (tiles-per-SM is just over a whole integer).最后，我们可以看到，当波总数较低时，波量化效果最明显。
+竖直虚线表示 wave 的边界。 As expected, there is a sharp drop in performance for the DataParallel mode when going over wave boundaries.这就是波的量子化效应。The DataParallel mode matches or outperforms all other modes when the last wave is mostly full (tiles-per-SM is just under a whole integer), and underperforms when it is nearly empty (tiles-per-SM is just over a whole integer).最后，我们可以看到，当波总数较低时，波量化效果最明显。
 
-With Split-K, the effect of wave quantization is lessened. Split-K 有效地将tile的数量乘以 K 倍，因此波数也增加了 K 倍。您可以在图中看到这一点，因为具有 2 个分割的 Split-K 的性能振荡频率是 DataParallel 的两倍。不幸的是,减少额外的费用似乎超过了大多数情况下的好处,而Split-K与其他两个调度器相比,很少表现得很好 (通常是在太少的块时,使得GPU会被严重不充分利用而不会被分割).为了保持整洁，该图仅显示了 K 为 2 的 Split-K；除了非常小的 X 之外，较高的 K 值通常比 K=2 表现更差。
+使用 Split-K 后，wave quantization 的影响会减弱。 Split-K 有效地将tile的数量乘以 K 倍，因此波数也增加了 K 倍。您可以在图中看到这一点，因为具有 2 个分割的 Split-K 的性能振荡频率是 DataParallel 的两倍。不幸的是,减少额外的费用似乎超过了大多数情况下的好处,而Split-K与其他两个调度器相比,很少表现得很好 (通常是在太少的块时,使得GPU会被严重不充分利用而不会被分割).为了保持整洁，该图仅显示了 K 为 2 的 Split-K；除了非常小的 X 之外，较高的 K 值通常比 K=2 表现更差。
 
 相比之下，Stream-K 性能不显示波量化，随着波数的变化波动很小。一般来说，Stream-K 分区与 Split-K 匹配或优于 Split-K，并且当最后一个波接近空时，以较大的 K 值击败 DataParallel 分区。在 N=7296 处，DataParallel 和 Stream-K 得到相同的结果，对应于 X=1024*7296/114=4。由于tile可均匀分配到 CTA，因此不需要部分tile或减少。因此 DataParallel 和 Stream-K 得到相同的结果。
 

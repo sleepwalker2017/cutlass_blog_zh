@@ -40,9 +40,9 @@ GEMM 内核中有两个主要操作：一是把数据搬运到正确的内存位
 
 GPU 程序员实现重叠的最基本方式，是利用额外的 *warp*（warp 是由 32 个连续线程组成的执行单元）。NVIDIA GPU 允许每个 SM 同时驻留大量 warp，并且可以以极低开销在它们之间切换。特别是，当某个 warp 遇到较慢的内存访问时，warp 调度器可以切换到另一个 warp 继续执行。为了进一步给 warp 调度器创造隐藏延迟的机会，研究者在 2011 年左右提出了 *warp specialization* [[1, 2]](https://research.colfax-intl.com/cutlass-tutorial-design-of-a-gemm-kernel/#bibliography)。在 warp specialization 中，一部分 warp 专门负责内存获取（*生产者*），另一部分 warp 专门负责计算（*消费者*），它们之间通过命名屏障进行同步。这个思路的核心在于，让 warp 调度器更容易用计算去掩盖拷贝延迟，反之亦然。
 
-从 Ampere 架构开始，NVIDIA 推出了 `cp.async`，它允许同一个 warp 在执行数学计算的同时异步发起内存拷贝。具体来说，warp 可以发出 `cp.async` 把下一批数据加载到缓冲区，同时继续在当前缓冲区上做计算，而不必等异步加载完成后再继续执行。这样一来，就不再必须依赖 warp specialization 才能用计算去掩盖数据传输开销。*Multistage* 内核设计正是基于这一思路。最快的 Ampere GEMM 内核，以及著名的 FlashAttention-2，都采用了 multistage 设计。
+从 Ampere 架构开始，NVIDIA 推出了 `cp.async`，它允许同一个 warp 在执行数学计算的同时异步发起内存拷贝。具体来说，warp 可以发出 `cp.async` 把下一批数据加载到缓冲区，同时继续在当前缓冲区上执行计算，而不必等异步加载完成后再继续。这样一来，就不再必须依赖 warp specialization 才能用计算去掩盖数据传输开销。*Multistage* 内核设计正是基于这一思路。最快的 Ampere GEMM 内核，以及著名的 FlashAttention-2，都采用了 multistage 设计。
 
-最后，随着最新的 GPU 架构 — Hopper — 引入了 TMA 异步复制和 warpgroup 范围寄存器重新分配等新功能，结合起来使 warp 专业化在 Hopper 上非常有效（如下所述）。特别是，最快的 CUTLASS Hopper GEMM 内核使用warp specialization。
+最后，随着最新的 GPU 架构 Hopper 引入 TMA 异步复制、warpgroup 级寄存器重分配等新能力，warp specialization 在 Hopper 上变得尤其有效。事实上，CUTLASS 中性能最好的 Hopper GEMM 内核，就采用了这种设计。
 
 ### 管道图解
 
@@ -215,7 +215,7 @@ if (params_.is_leader) {
 
 ### warp specialization
 
-在多级内核中，每个 warp 都承担生产者和消费者的角色。两个角色之间的切换是使用`PipelineState`抽象，并且 TMA 加载的异步性允许两种类型的操作重叠。另一种策略，*warp专业化*，为不同的扭曲分配不同的角色，这样我们就有*生产者扭曲*完全致力于内存复制和*消费者扭曲*完全致力于计算。如上所述，warp 调度程序可以通过在两种类型的 warp 之间切换来隐藏延迟。请注意，与多级内核不同，warp 专业化本质上并不依赖于*异步*但在实践中仍然受益匪浅。
+在多级内核中，每个 warp 都承担生产者和消费者的角色。两个角色之间的切换是使用`PipelineState`抽象，并且 TMA 加载的异步性允许两种类型的操作重叠。另一种策略，*warp专业化*，为不同的扭曲分配不同的角色，这样我们就有*生产者扭曲*完全致力于内存复制和*消费者扭曲*完全致力于计算。如上所述，warp 调度程序可以通过在两种类型的 warp 之间切换来隐藏延迟。请注意，与多级内核不同，warp specialization本质上并不依赖于*异步*但在实践中仍然受益匪浅。
 
 特别是对于我们的 GEMM，生产者扭曲使用 TMA 将数据从全局内存加载到共享内存，而消费者扭曲使用 WGMMA 计算分片 GEMM。值得注意的是，在我们的简化设置中，两种类型的 warp 中的执行流程都是内部串行的，i.e。TMA 和 WGMMA 指令本身并不重叠*内部*-warpgroup。然而，还有更复杂的内核调度，它们利用 TMA 和 WGMMA 的异步性来实现与其他指令的warpgroup内重叠，例如[FlashAttention-3](https://research.colfax-intl.com/flashattention-3-fast-and-accurate-attention-with-asynchrony-and-low-precision/).
 

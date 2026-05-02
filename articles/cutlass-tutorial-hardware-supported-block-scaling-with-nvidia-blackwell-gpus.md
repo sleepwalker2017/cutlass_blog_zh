@@ -21,7 +21,7 @@ english_markdown: "articles-en/cutlass-tutorial-hardware-supported-block-scaling
 D = (A * scale_A) @ (B * scale_B) + C
 ```
 
-在AI应用中，块缩放用于补偿低精度数字格式的低动态范围，通过使用缩放因子在量化之前将原始高精度权重或激活张量的所有条目缩放到统一范围。为了实现缩放，缩放因子使用了一系列粒度。在一种极端情况下，我们可以单独缩放每个矩阵条目；在另一个极端，我们可以将单个公共比例因子与整个矩阵相关联。 Blackwell Tensor Cores 为中间方案提供硬件支持，其中（对于密集 GEMM）每个 row/column 在 K 模式下被分为 16 或 32 个元素块，每个块乘以自己的比例因子。
+在AI应用中，块缩放用于补偿低精度数字格式的低动态范围，通过使用缩放因子在量化之前将原始高精度权重或激活张量的所有条目缩放到统一范围。为了实现缩放，缩放因子使用了一系列粒度。在一种极端情况下，我们可以单独缩放每个矩阵条目；在另一个极端，我们可以将单个公共比例因子与整个矩阵相关联。 Blackwell Tensor Core 为中间方案提供硬件支持，其中（对于密集 GEMM）每个 row/column 在 K 模式下被分为 16 或 32 个元素块，每个块乘以自己的比例因子。
 
 ![图 1. 块级 GEMM，来自 PTX 文档。](../images/cutlass-tutorial-hardware-supported-block-scaling-with-nvidia-blackwell-gpus/image-4-c1fc0073a7.png)
 

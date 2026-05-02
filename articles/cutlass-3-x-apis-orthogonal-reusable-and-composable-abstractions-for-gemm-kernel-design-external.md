@@ -99,7 +99,7 @@ CollectiveMma 具有各种调谐旋钮，允许用户根据 TiledCopy 和 TiledM
 
 using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilder<
   ArchTag,       // e.g. cute::arch::Sm90 for Hopper
-  OpClass,       // e.g. cute::arch::OpClassTensorOp for Tensor Cores
+  OpClass,       // e.g. cute::arch::OpClassTensorOp for Tensor Core
   ElementA, LayoutA, AlignmentA,
   ElementB, LayoutB, AlignmentB,
   ElementAccumulator,
@@ -111,7 +111,7 @@ using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilder
 
 模板参数从用户友好的标准中进行选择，并使用它们将较低级别的参数推导到 CollectiveMma 模板：
 
-- **建筑学专业：**GPU 架构和 MMA 运算符的类型（例如，SIMT 或 Tensor Cores）。
+- **建筑学专业：**GPU 架构和 MMA 运算符的类型（例如，SIMT 或 Tensor Core）。
 - **操作数和累加器信息：**操作数和累加器的数据类型，以及全局内存中操作数的对齐和编译时布局信息（例如，行优先或列优先）。
 - **瓷砖形状：**用于推导TiledMma和TiledCopy对象以及SMEM布局。
 - **日程安排信息：**调度算法使用集群形状、管道阶段计数和内核调度。阶段计数和内核调度参数有默认的“自动”选项，它告诉 CUTLASS 尝试自动为给定的架构和参数选择最佳的选项。
@@ -125,7 +125,7 @@ CUTLASS 有几个尾声，定义[这里](https://github.com/NVIDIA/cutlass/tree/
 - 有关矩阵 C 和 D 的数据类型和编译时布局信息。
 - 指定任何附加后处理的融合操作。
 - 适用于 GMEM 存储和任何 SMEM 暂存的 TiledCopy 操作。
-- 调度策略，与集体主循环一样，包含有关集群大小、TMA 使用、warp 专业化等信息。
+- 调度策略，与集体主循环一样，包含有关集群大小、TMA 使用、warp specialization等信息。
 
 这[尾声的 CollectiveBuilder](https://github.com/NVIDIA/cutlass/blob/62750a2b75c802660e4894434dc55e839f322277/include/cutlass/epilogue/collective/collective_builder.hpp)呈现更统一、更高级的接口：
 

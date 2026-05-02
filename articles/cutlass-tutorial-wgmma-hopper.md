@@ -15,36 +15,36 @@ english_markdown: "articles-en/cutlass-tutorial-wgmma-hopper.en.md"
 
 如果一个 CUDA® 教程系列里没有 GEMM（通用矩阵乘法），那几乎是不完整的。GEMM 可以说是现代 GPU 上最重要的基础例程之一：神经网络、大语言模型，以及大量图形应用中的主要计算，都建立在它之上。尽管 GEMM 无处不在，但要把它写得高效并不容易。
 
-这个由 3 部分组成的教程系列旨在帮助读者全面了解如何使用 CUTLASS 库在 NVIDIA Hopper GPU 上编写高效的 GEMM 内核。
+这个由 3 部分组成的教程系列，旨在帮助读者系统理解如何使用 CUTLASS 在 NVIDIA Hopper GPU 上编写高效的 GEMM 内核。
 
 - [第 1 部分（也就是本文）] 讨论 warpgroup 矩阵乘加（WGMMA）指令，它们是面向 Hopper 架构 NVIDIA GPU 上 Tensor Core 的底层原语。
-- [第 2 部分](https://github.com/NVIDIA/cutlass/blob/main/media/docs/efficient_gemm.md)讨论高效 GEMM 内核的整体设计，包括 CUTLASS 内核中使用的 advanced 技术，例如 warp specialization 和 ping-pong 调度。
-- [第 3 部分] 讨论 persistent kernel 与 [Stream-K](https://arxiv.org/abs/2301.03598)，也就是 GEMM 中的负载均衡策略，它们能够在大量问题形状上实现非常高的效率。
+- [第 2 部分](https://github.com/NVIDIA/cutlass/blob/main/media/docs/efficient_gemm.md)讨论高效 GEMM 内核的整体设计，包括 CUTLASS 内核中使用的一些高级技术，例如 warp specialization 和 ping-pong 调度。
+- [第 3 部分] 讨论 persistent kernel 与 [Stream-K](https://arxiv.org/abs/2301.03598)。它们是 GEMM 中的重要负载均衡策略，能够在大量问题形状上实现很高的效率。
 
-**大局。**我们系列中的 3 个部分大致遵循 GEMM 内核的整个开发过程，但是“由内而外”。首先，我们有平铺 GEMM 原语，它调用 Tensor Cores 来最终进行计算。其次，我们有 GEMM 内核设计，如“per CTA”所示——由*序幕*, *主循环*， 和*结语*— 主要挑战是不要在内存负载上限制快速 Tensor Cores。最后，我们在最外层网格级别进行 CTA 调度，其中负载平衡考虑因素成为最重要的因素。
+**大局。**这个系列的 3 个部分，大致对应了 GEMM 内核从里到外的完整构建过程。首先是 tile 级 GEMM 原语，也就是最终真正调用 Tensor Core 执行计算的那一层。其次是单个 CTA 视角下的 GEMM 内核设计，它通常由 *prologue*、*mainloop* 和 *epilogue* 组成；这一层的主要挑战，是不要让高速的 Tensor Core 受制于内存加载。最后是最外层网格级别的 CTA 调度，在这一层，负载均衡就成为最关键的问题。
 
-我们希望在读完本系列之后，读者将成为 GEMM 算法的专家，并可以利用该算法中的一些美妙想法在自己的工作中设计和实现其他内核。
+我们希望，读完这个系列之后，读者不仅能真正理解 GEMM 的实现方式，也能把其中一些漂亮的设计思想迁移到自己的内核开发工作里。
 
 ### 异步 warpgroup MMA（WGMMA）
 
 Hopper 引入了异步的 warpgroup 级矩阵乘加操作（WGMMA）。一个 *warpgroup* 由 4 个连续的 warp 组成，也就是 128 个连续线程；其中第一个 warp 的编号必须是 4 的倍数。`wgmma.mma_async` 指令由一个 warpgroup 中全部 128 个线程共同执行。它通常具有以下两种形式之一，其中矩阵 `C` 作为累加器：
 
 - `C = A * B + C`
-- `C = A * B`，其中来自累加器的输入`C`已禁用。
+- `C = A * B`，其中累加器 `C` 的输入被禁用。
 
-WGMMA 的一个值得注意的要求是操作数`B`必须始终存储在共享内存（SMEM）中。相反，操作数`A`可以位于 SMEM 或寄存器存储器（RMEM）中，并且累加器`C`始终保存在 RMEM 中。
+WGMMA 有一个重要限制：操作数 `B` 必须始终存放在共享内存（SMEM）中。相比之下，操作数 `A` 可以位于 SMEM，也可以位于寄存器内存（RMEM）中；而累加器 `C` 始终保存在 RMEM 中。
 
 本文结构如下。首先，我们讨论在 CUTLASS 中调用 `wgmma.mma_async` 的关键点，这包括构建相应的 `TiledMMA` 对象，以及创建并分区与 WGMMA 兼容的 SMEM 张量。其次，我们讨论保证 WGMMA 正确性所需的同步机制。最后，我们会更深入地解释 WGMMA 中使用的布局，包括所谓的 *core matrix* 与 *matrix descriptor* 等概念，它们都与源自 SMEM 的操作数有关。
 
-为了简洁起见，我们将在全文中缩写`wgmma.mma_async`作为`wgmma`。我们的主要代码参考将是 CUTLASS[wgmma教程](https://github.com/NVIDIA/cutlass/blob/be60a0b27204078dc0f3f1d6ed4a95cdb2114111/examples/cute/tutorial/wgmma_sm90.cu)由 Pradeep Ramani 贡献，在 3.5.1 版本中添加。
+为了简洁起见，后文会把 `wgmma.mma_async` 简写为 `wgmma`。本文主要参考的代码，是 CUTLASS 的 [wgmma 教程](https://github.com/NVIDIA/cutlass/blob/be60a0b27204078dc0f3f1d6ed4a95cdb2114111/examples/cute/tutorial/wgmma_sm90.cu)，由 Pradeep Ramani 编写，并在 3.5.1 版本中加入。
 
 ### CUTLASS 内核中的 WGMMA
 
-本教程的主要目标是解释`wgmma`用于调用 Hopper Tensor Cores 执行基于tile的 GEMM 的原语，以及如何将其作为`cute::gemm`称呼。为了做好准备，请考虑采用输入矩阵的标准 GEMM 内核`A`和`B`有尺寸`MxNxK`并计算`C=A*B`。为了并行化计算，内核修复了静态tile 大小`bM`, `bN`， 和`bK`并启动一个网格`⌈M/bM⌉x⌈N/bN⌉`许多 CTA，每个 CTA 计算一个`bMxbN`瓦`rC`的输出矩阵。这将在写回全局之前保存在 CTA 的 RMEM 中`C`矩阵。
+本教程的主要目标，是解释 `wgmma` 这组原语如何调用 Hopper 上的 Tensor Core 来执行基于 tile 的 GEMM，以及它们如何被封装进 `cute::gemm` 调用中。为了说明问题，我们先考虑一个标准的 GEMM 内核：输入矩阵 `A` 和 `B` 的尺寸为 `MxNxK`，输出满足 `C = A * B`。为了并行化计算，内核会固定静态 tile 尺寸 `bM`、`bN` 和 `bK`，并启动一个 `⌈M/bM⌉ x ⌈N/bN⌉` 的 CTA 网格，其中每个 CTA 负责输出矩阵中的一个 `bM x bN` tile `rC`。这个结果会先保存在 CTA 的 RMEM 中，最后再写回全局内存中的 `C`。
 
-根据 CTA，我们得到了内核的*主循环*。超过`⌈K/bK⌉`许多次迭代，我们循环内部维度并连续加载`bMxbK`和`bNxbK`的瓷砖`A`和`B`从全局内存到共享内存`sA`和`sB`;请注意，在 CUTLASS 中，我们修复了`sB`是数学上的转置。 （事实上​​，按照常见的做法，我们加载的tile`A`和`B`进入循环 SMEM 缓冲区，其中阶段数由编译时整数给出，例如 2 或 3。形状元组的最后一个模式为`sA`和`sB`然后由该阶段计数给出。）`cute::gemm`然后调用计算（的分阶段切片）的乘积`sA`和`sB`并将该值依次累加到`rC`。主循环完成后，尾声会写出`rC`到全局内存。
+从单个 CTA 的角度看，内核的核心是它的 *mainloop*。在 `⌈K/bK⌉` 次迭代中，我们沿着内部维度循环，依次把 `A` 和 `B` 的 `bM x bK` 与 `bN x bK` tile 从全局内存加载到共享内存中的 `sA` 与 `sB`。需要注意的是，在 CUTLASS 中，`sB` 的布局会被组织成数学意义上的转置形式。实际上，按照常见做法，这些 tile 会被加载进循环使用的 SMEM 缓冲区，阶段数通常在编译期固定为 2 或 3，因此 `sA` 和 `sB` 的形状元组最后一个模式就是这个 stage 数。随后，`cute::gemm` 会对 `sA` 和 `sB` 的相应 stage 切片做乘加，并把结果持续累加到 `rC` 中。主循环结束后，epilogue 再把 `rC` 写回全局内存。
 
-现在，我们想解释以下内容`cute::gemm`调用以及进入其中的参数，正如它们出现在我们有选择地从以下代码片段中提取的那样[wgmma教程](https://github.com/NVIDIA/cutlass/blob/main/examples/cute/tutorial/wgmma_sm90.cu#L73)（隐藏与我们无关的程序部分，例如管道 TMA 加载）：
+下面我们来解释 `cute::gemm` 调用本身，以及它依赖的那些参数。下面这段代码摘自 [wgmma 教程](https://github.com/NVIDIA/cutlass/blob/main/examples/cute/tutorial/wgmma_sm90.cu#L73)，其中省略了与本文无关的部分，例如流水线化的 TMA 加载：
 
 ```
 
@@ -84,7 +84,7 @@ __global__ device_gemm(TiledMMA tiled_mma, ...) {
 }
 ```
 
-在CUTLASS中[MMA 的范例](https://github.com/NVIDIA/cutlass/blob/main/media/docs/cute/0t_mma_atom.md)， 这`cute::gemm`方法旨在通过统一的接口公开特定于体系结构的 MMA 指令。 （事实上​​，如果你检查[SM80教程 GEMM内核](https://github.com/NVIDIA/cutlass/blob/main/examples/cute/tutorial/sgemm_sm80.cu#L275)，你会看到`cute::gemm`call there 在语法上与上面给出的相同。）但是，涉及参数的定义`cute::gemm`调用涉及许多 WGMMA 特定的方面：
+在 CUTLASS 的 [MMA 范式](https://github.com/NVIDIA/cutlass/blob/main/media/docs/cute/0t_mma_atom.md)中，`cute::gemm` 的目标，是用统一接口来暴露不同架构下的 MMA 指令。事实上，如果你去看 [SM80 教程里的 GEMM 内核](https://github.com/NVIDIA/cutlass/blob/main/examples/cute/tutorial/sgemm_sm80.cu#L275)，会发现那里的 `cute::gemm` 在语法上和这里几乎一模一样。不过，WGMMA 场景下与 `cute::gemm` 相关的参数定义，带有一些明显的 WGMMA 特性：
 
 - 的定义`TiledMMA`目的`tiled_mma`封装了所需的信息`cute::gemm`发送到特定的`wgmma`PTX指令。
 - SMEM 张量的布局`sA`和`sB`必须定义为兼容`wgmma`.

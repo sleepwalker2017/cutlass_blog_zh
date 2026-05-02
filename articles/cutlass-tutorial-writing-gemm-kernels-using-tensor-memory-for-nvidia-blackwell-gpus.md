@@ -41,7 +41,7 @@ NVIDIA Blackwell 架构引入了一些新功能，这些功能显着改变了 GE
 
 ## 张量记忆
 
-**张量内存（TMEM）**是供Tensor Cores使用的专用片上存储器。其主要目的是使用 TMEM 来替换第五代 Tensor Core 操作的寄存器。特别是对于 UMMA，该指令需要以下输入源：
+**张量内存（TMEM）**是供Tensor Core使用的专用片上存储器。其主要目的是使用 TMEM 来替换第五代 Tensor Core 操作的寄存器。特别是对于 UMMA，该指令需要以下输入源：
 
 - 操作数 A 可以是 TMEM 或 SMEM
 - 操作数 B 必须位于 SMEM 中
@@ -49,7 +49,7 @@ NVIDIA Blackwell 架构引入了一些新功能，这些功能显着改变了 GE
 
 这意味着UMMA不需要寄存器来存储数据，减少了MMA操作的寄存器压力。此外，由于缺乏寄存器要求，加上单线程启动，可以进一步将 MMA 与 CTA 的主执行解耦。与 TMA 结合，CTA 在标准 GEMM 中直接执行的唯一处理是预处理和后处理。
 
-在历史背景下，这些发展延续了用专用硬件资源取代通用计算资源的趋势，以消除瓶颈并释放这些通用资源用于其他操作。从 Volta 架构开始，Tensor Cores 将 GEMM 算术运算与通用计算管道分离。Ampere 的异步复制指令可实现 GEMM 主循环的真正流水线操作。在 Hopper GPU 上，异步、单线程 TMA 以及在 warpgroup 之间重新分配寄存器的能力极大地降低了数据移动的寄存器和线程成本，并且异步 WGMMA 允许 MMA 与其他计算操作进行流水线操作。现在，Tensor Memory 和 UMMA 对 MMA 的作用就像 TMA 对复制所做的那样，使其成为不消耗寄存器的单线程异步操作。因此，寄存器主要可用于其他任务，例如调度和融合尾声操作。
+在历史背景下，这些发展延续了用专用硬件资源取代通用计算资源的趋势，以消除瓶颈并释放这些通用资源用于其他操作。从 Volta 架构开始，Tensor Core 将 GEMM 算术运算与通用计算管道分离。Ampere 的异步复制指令可实现 GEMM 主循环的真正流水线操作。在 Hopper GPU 上，异步、单线程 TMA 以及在 warpgroup 之间重新分配寄存器的能力极大地降低了数据移动的寄存器和线程成本，并且异步 WGMMA 允许 MMA 与其他计算操作进行流水线操作。现在，Tensor Memory 和 UMMA 对 MMA 的作用就像 TMA 对复制所做的那样，使其成为不消耗寄存器的单线程异步操作。因此，寄存器主要可用于其他任务，例如调度和融合尾声操作。
 
 TMEM 的大小为每个 SM 256KB，并以 512 列和 128 行的二维方式组织，或者**车道**，32 位单元。这种固有的 2-D 结构也反映在 32 位地址中，其中位 31-16 表示通道 ID，而 15-0 表示列。这张图片来自于[PTX 文档](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#tensor-memory-addressing)显示布局：
 
@@ -527,4 +527,4 @@ if (elect_one_warp) {
 
 我们在这篇文章中讨论的示例仅处理单个 SM UMMA 指令，并且仅使用了简单的簇形状`<1,1,1>.`然而，集群级协作是Blackwell内核的重要组成部分。在下一篇文章中，我们将讨论使用多播和 2SM UMMA 处理重要簇形状的示例。
 
-Cris Cecka、Mihir Awatramani，“使用 CUTLASS 编程 Blackwell Tensor Cores”，GTC 2025，[https://www.nvidia.com/en-us/on-demand/session/gtc25-s72720/](https://www.nvidia.com/en-us/on-demand/session/gtc25-s72720/).
+Cris Cecka、Mihir Awatramani，“使用 CUTLASS 编程 Blackwell Tensor Core”，GTC 2025，[https://www.nvidia.com/en-us/on-demand/session/gtc25-s72720/](https://www.nvidia.com/en-us/on-demand/session/gtc25-s72720/).

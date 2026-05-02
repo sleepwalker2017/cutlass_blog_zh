@@ -13,7 +13,7 @@ english_markdown: "articles-en/cutlass-tutorial-gemm-with-thread-block-clusters-
 
 英文对照：[articles-en/cutlass-tutorial-gemm-with-thread-block-clusters-on-nvidia-blackwell-gpus.en.md](../articles-en/cutlass-tutorial-gemm-with-thread-block-clusters-on-nvidia-blackwell-gpus.en.md)
 
-欢迎来到我们研究 NVIDIA Blackwell 架构上的 GEMM 系列的第二部分。在第 1 部分中，我们介绍了 NVIDIA Blackwell GPU 上可用的一些关键新功能，包括张量内存，并介绍了如何编写使用新 UMMA 指令的简单 CUTLASS GEMM 内核（`tcgen05.mma`）以 Blackwell Tensor Cores 为目标。在这篇文章中，我们将解释如何利用线程块集群和 2-SM UMMA 来实现 Blackwell GEMM。更具体地说，我们将按顺序涵盖以下几个方面：
+欢迎来到我们研究 NVIDIA Blackwell 架构上的 GEMM 系列的第二部分。在第 1 部分中，我们介绍了 NVIDIA Blackwell GPU 上可用的一些关键新功能，包括张量内存，并介绍了如何编写使用新 UMMA 指令的简单 CUTLASS GEMM 内核（`tcgen05.mma`）以 Blackwell Tensor Core 为目标。在这篇文章中，我们将解释如何利用线程块集群和 2-SM UMMA 来实现 Blackwell GEMM。更具体地说，我们将按顺序涵盖以下几个方面：
 
 1. 使用[Tensor Memory Accelerator](https://research.colfax-intl.com/tutorial-hopper-tma/)(TMA) 使用线程块集群和多播来分割参与的 CTA 之间的全局内存传输；
 2. 将Blackwell 2-SM UMMA与CTA配对使用，增加MMA的算术强度；
