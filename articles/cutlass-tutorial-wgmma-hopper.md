@@ -21,7 +21,7 @@ english_markdown: "articles-en/cutlass-tutorial-wgmma-hopper.en.md"
 - [第 2 部分](https://github.com/NVIDIA/cutlass/blob/main/media/docs/efficient_gemm.md)讨论高效 GEMM 内核的整体设计，包括 CUTLASS 内核中使用的一些高级技术，例如 warp specialization 和 ping-pong 调度。
 - [第 3 部分] 讨论 persistent kernel 与 [Stream-K](https://arxiv.org/abs/2301.03598)。它们是 GEMM 中的重要负载均衡策略，能够在大量问题形状上实现很高的效率。
 
-**大局。**这个系列的 3 个部分，大致对应了 GEMM 内核从里到外的完整构建过程。首先是 tile 级 GEMM 原语，也就是最终真正调用 Tensor Core 执行计算的那一层。其次是单个 CTA 视角下的 GEMM 内核设计，它通常由 *prologue*、*mainloop* 和 *epilogue* 组成；这一层的主要挑战，是不要让高速的 Tensor Core 受制于内存加载。最后是最外层网格级别的 CTA 调度，在这一层，负载均衡就成为最关键的问题。
+**整体脉络** 本系列共 3 篇，基本对应 GEMM 内核从底层到上层的三个抽象层次。第一层是 tile 级 GEMM 原语，即直接驱动 Tensor Core 执行计算的那一层。第二层是单个 CTA 视角下的内核设计，通常由 *prologue*、*mainloop* 和 *epilogue* 组成；这一层的核心是让计算与数据搬运充分重叠，避免 Tensor Core 因内存访问而空转。第三层是网格级 CTA 调度；在这一层，关键问题是负载均衡。
 
 我们希望，读完这个系列之后，读者不仅能真正理解 GEMM 的实现方式，也能把其中一些漂亮的设计思想迁移到自己的内核开发工作里。
 
@@ -86,16 +86,16 @@ __global__ device_gemm(TiledMMA tiled_mma, ...) {
 
 在 CUTLASS 的 [MMA 范式](https://github.com/NVIDIA/cutlass/blob/main/media/docs/cute/0t_mma_atom.md)中，`cute::gemm` 的目标，是用统一接口来暴露不同架构下的 MMA 指令。事实上，如果你去看 [SM80 教程里的 GEMM 内核](https://github.com/NVIDIA/cutlass/blob/main/examples/cute/tutorial/sgemm_sm80.cu#L275)，会发现那里的 `cute::gemm` 在语法上和这里几乎一模一样。不过，WGMMA 场景下与 `cute::gemm` 相关的参数定义，带有一些明显的 WGMMA 特性：
 
-- 的定义`TiledMMA`目的`tiled_mma`封装了所需的信息`cute::gemm`发送到特定的`wgmma`PTX指令。
-- SMEM 张量的布局`sA`和`sB`必须定义为兼容`wgmma`.
-- 碎片`tCrA`, `tCrB`， 和`tCrC`使用以下方法将数据构造为线程级分区`TiledMMA`对象，因此具有程序员应该注意的 WGMMA 特定布局。
-- 碎片`tCrA`（如果采购操作数`A`来自 SMEM）和`tCrB`不是寄存器支持的张量，其值是从 SMEM 复制的，而是在 SMEM 之上构造的矩阵描述符。
+- `TiledMMA` 对象 `tiled_mma` 的定义，封装了 `cute::gemm` 最终发射特定 `wgmma` PTX 指令所需的信息。
+- SMEM 张量 `sA` 和 `sB` 的布局必须满足 `wgmma` 的兼容约束。
+- `tCrA`、`tCrB` 和 `tCrC` 这些 fragment，是通过 `TiledMMA` 的线程级分区方法构造的，因此其布局具有 WGMMA 特有属性。
+- `tCrA`（当操作数 `A` 来自 SMEM 时）和 `tCrB` 并不是“把 SMEM 值拷到寄存器”得到的常规寄存器张量，而是基于 SMEM 构造的矩阵描述符视图。
 
-最后，当然还有围绕`cute::gemm`称呼。我们将依次解释所有这些概念。
+最后，还需要解释 `cute::gemm` 前后包裹的同步调用。下面会按顺序展开。
 
 ### WGMMA 的 TiledMMA 对象
 
-接下来，假设数据类型为 FP16，并且`A`和`B`是`MN`-major，所以在 BLAS 表示法中，我们正在计算 NT gemm。我们构建`TiledMMA`主机上的对象使用`cute::make_tiled_mma`方法如下：
+接下来，假设数据类型为 FP16，且 `A` 和 `B` 都是 `MN`-major（按 BLAS 记号即 NT GEMM）。我们在主机侧通过 `cute::make_tiled_mma` 构造 `TiledMMA` 对象：
 
 ```
 
@@ -103,31 +103,31 @@ TiledMMA tiled_mma = cute::make_tiled_mma(
   SM90_64x64x16_F16F16F16_SS<GMMA::Major::MN,GMMA::Major::MN>{});
 ```
 
-尽管`cute::make_tiled_mma`还有一些可选参数，让我们关注手头的一个 -*MMA原子*。这是一个包装底层 PTX 调用的结构，在本例中是：
+`cute::make_tiled_mma` 还有一些可选参数，这里先聚焦最核心的 *MMA atom*。它是对底层 PTX 调用的封装，在本例中对应：
 
 ```
 
 wgmma.mma_async.sync.aligned.m64n64k16.f16.f16.f16
 ```
 
-CUTLASS 表示法使得人们可以立即读出包装的 PTX 指令和 MMA 原子之间的关系。首先，SM90 是 Hopper 架构的不同名称。 SM90 MMA 原子被标记为`SM90_MxNxK_XYZ_SS`或者`SM90_MxNxK_XYZ_RS`，有两个模板参数，可以是`GMMA::Major::MN`或者`GMMA::Major::K`。它们的含义如下：
+CUTLASS 的命名可以直接映射到 PTX 指令语义。首先，SM90 对应 Hopper 架构。SM90 MMA atom 一般命名为 `SM90_MxNxK_XYZ_SS` 或 `SM90_MxNxK_XYZ_RS`，并带有两个模板参数（`GMMA::Major::MN` 或 `GMMA::Major::K`）。含义如下：
 
 - `X`和`Y`是操作数的数据类型。
 - `Z`是累加器的数据类型。
-- `MxNxK`是tile尺寸`wgmma`指令使用“wgmma 原子”进行计算。并非所有值`MxNxK`是可能的。这是[允许的形状列表](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#asynchronous-warpgroup-level-matrix-shape): `M`始终是 64，`N`是从 8 到 256 的 8 的倍数，对于 16 位操作数数据类型，`K`是 16（更一般地说，`K`固定为 32 字节）。
-- 后缀`RS`或者`SS`指示是否操作数`A`来自寄存器（`R`）或共享内存（`S`）。操作数`B`总是来自共享内存，因此`S`.
-- 两个模板参数表示操作数是否`A`和`B`是内存连续的`MN`模式或`K`模式。例如，在 BLAS 表示法中，操作数都是`K`-major 对应于 TN gemm（参见[这张桌子](https://github.com/NVIDIA/cutlass/blob/main/media/docs/cute/0x_gemm_tutorial.md#aside-m-major-n-major-k-major)）。请注意，对于 16 位操作数数据类型，内存布局具有灵活性：`MN`-主要或`K`-主要的。然而，对于非 16 位操作数数据类型，**布局必须始终是`K`-主要的**.
+- `MxNxK` 是 `wgmma` 指令计算时使用的 tile 尺寸。它并非任意取值，可选范围见[官方列表](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#asynchronous-warpgroup-level-matrix-shape)：`M` 固定为 64，`N` 是 8 到 256 的 8 倍数；对 16 位操作数，`K` 为 16（更一般地说，`K` 固定为 32 字节）。
+- 后缀 `RS` 或 `SS` 表示操作数 `A` 来自寄存器（`R`）还是共享内存（`S`）。操作数 `B` 始终来自共享内存，因此一定是 `S`。
+- 两个模板参数表示操作数 `A` 与 `B` 在内存中是按 `MN` 模式连续还是按 `K` 模式连续。例如按 BLAS 记号，两者都是 `K`-major 对应 TN GEMM（见[这张表](https://github.com/NVIDIA/cutlass/blob/main/media/docs/cute/0x_gemm_tutorial.md#aside-m-major-n-major-k-major)）。注意：对 16 位操作数，`MN`-major 与 `K`-major 都可用；但对非 16 位操作数，**布局必须是 `K`-major**。
 
-这就是您需要了解的 MMA Atom 语法！现在，我们强调 WGMMA 是一个*warpgroup范围*操作说明。在代码中，您可以使用 TiledMMA 对象定义的 MMA 操作来检索参与 MMA 操作的线程数*尺寸*。例如以下主机代码
+以上就是 MMA atom 语法的核心。接下来强调一点：WGMMA 是 *warpgroup 范围* 指令。代码中可通过 `TiledMMA` 查询参与该 MMA 操作的线程数（`size`）。例如：
 
 ```
 
 dim3 dimBlock(cute::size(tiled_mma));
 ```
 
-规定内核中的每个 CTA 以 1 个 128 个线程的 warpgroup 启动。
+这表示内核中的每个 CTA 以 1 个 128 线程的 warpgroup 启动。
 
-假设我们想要*2 个warpgroup*执行 WGMMA，使用单独的warpgroup独立计算输出 tile的一半（并且每个warpgroup发出各自的`wgmma`指示）。为此，我们可以传递一个不平凡的布局（`AtomLayoutMNK`）到`make_tiled_mma`方法作为其第二个参数。例如下面的代码
+假设我们希望由 *2 个 warpgroup* 执行 WGMMA，让两个 warpgroup 分别计算输出 tile 的一半（每个 warpgroup 发射各自的 `wgmma` 指令）。这时可把非平凡布局 `AtomLayoutMNK` 作为 `make_tiled_mma` 的第二个参数。例如：
 
 ```
 
@@ -136,15 +136,15 @@ dim3 dimBlock(cute::size(tiled_mma));
   Layout<Shape<_2,_1,_1>>{});
 ```
 
-定义了一个 WGMMA 操作，其中 warpgroup 1 和 2 计算输出 tile的上半部分和下半部分，并沿`M`模式（现在假设`bM`是 128 的倍数）。而且，`size(tiled_mma)`则等于 256。
+这定义了一个 WGMMA 操作：warpgroup 1 和 2 分别计算输出 tile 的上半与下半，并沿 `M` 模式切分（此时假设 `bM` 是 128 的倍数）。同时，`size(tiled_mma)` 会变为 256。
 
-一般来说，两个可选的布局参数`make_tiled_mma` — `AtomLayoutMNK`和`PermutationMNK`— 对于任何 MMA Atom 都具有相同的作用。为了理解的用途`PermutationMNK`，我们推荐 Cris Cecka 的[很好的解释](https://github.com/NVIDIA/cutlass/discussions/1345).
+一般来说，`make_tiled_mma` 的两个可选布局参数 `AtomLayoutMNK` 和 `PermutationMNK`，对任意 MMA atom 的作用机制是一致的。关于 `PermutationMNK` 的用途，推荐阅读 Cris Cecka 的[解释](https://github.com/NVIDIA/cutlass/discussions/1345)。
 
 ### SMEM WGMMA 的布局约束
 
 接下来，我们解释在选择 MMA 原子的情况下，SMEM 中操作数矩阵的tile 大小和布局的约束。首先，对于任何 MMA 指令，`MxNxK`MMA 原子的原子需要分为操作数和累加器块的原子。在我们的例子中，这意味着`bM`应该是 64 的倍数，`bN`64 的倍数，以及`bK`16的倍数。
 
-其次，WGMMA 对 SMEM 布局特别施加了一个附加约束：`sA`和`sB`（形状和步幅），并且此约束根据所选的混合模式而变化。特别是（的阶段切片）的布局`sA`不简单`(bM,bK):(1,bM)`或者`(bM,bK):(bK,1)`一般来说，对于`sB`.
+其次，WGMMA 对 SMEM 布局有额外约束：`sA` 和 `sB`（形状与步幅）必须满足所选 swizzle 模式的要求。特别是，`sA`（以及 `sB`）的每个 stage 切片通常不能直接用简单布局 `(bM,bK):(1,bM)` 或 `(bM,bK):(bK,1)` 表示。
 
 要深入理解这些要求，需要以下概念：*核心矩阵*，下面我们就来介绍一下。然而，实际上，我们总是可以构建保证兼容的布局`wgmma`使用 CUTLASS 提供的某些预定义布局原子，然后是`cute::tile_to_shape`方法。在我们的示例中，我们准备了tile尺寸和`sA`, `sB`在主机上如下（与`T=cutlass::half_t`这是 CUTLASS 对 FP16 的名称）：
 
@@ -172,7 +172,7 @@ auto sB = cute::tile_to_shape(
 Sw&lt;3,4,3> o smem_ptr[16b](unset) o ((_64,_2),(_8,_8),_3):((_1,_512),(_64,_1024),_8192)
 ```
 
-这个布局从何而来？`cute::tile_to_shape`采用一个布局（同名tile）并将其复制到更大的形状上（类似于`numpy.tile`）。抛开 swizzle 函数`Sw<3,4,3>`，我们有布局原子由下式给出`(64,8):(1,64)`并平铺在形状上`(128, 64, 3)`在**专栏专业**时尚，所以对于`MxK`形状，较小的外步幅`512`在于`M`模式，而较大的外步幅`1024`在于`K`模式。 （最大的步幅`8192`在于阶段数`P`模式，这是有道理的，因为不同的阶段切片`sA`或者`sB`不应该混合在内存中。）
+这个布局怎么来的？`cute::tile_to_shape` 会把布局 atom 平铺到更大的目标形状（类似 `numpy.tile`）。先忽略 swizzle 函数 `Sw<3,4,3>`，布局 atom 可写作 `(64,8):(1,64)`，并被平铺到 `(128,64,3)`。对 `MxK` 而言，外层较小步幅 `512` 对应 `M` 模式，较大步幅 `1024` 对应 `K` 模式；最大步幅 `8192` 对应 stage 维 `P`，这保证不同 stage 切片不会在内存中互相重叠。
 
 注意`64`次`sizeof(half_t)`等于 128 字节，这是 swizzle 模式的名称。这是设计使然：由于核心矩阵的工作方式，我们总是将连续方向上的布局原子的长度安排为等于 swizzle 字节数 - 或者`16`不调酒，或其中之一`32`, `64`， 或者`128`.
 
@@ -199,12 +199,12 @@ Sw&lt;3,4,3> o smem_ptr[16b](unset) o (_128,_64,_3):(_64,_1,_8192)
 
 因为我们改为平铺`(8,64):(64,1)`超过`(128,64,3)`。 （注意布局`((_8,_16),(_64,_1),_3):((_64,_512),(_1,_0),_8192)`合并为`(_128,_64,_3):(_64,_1,_8192)`).
 
-一般来说，我们可以选择`8`布局原子的可能性，对应于`MN`或者`K`-主要和四种混合模式之一：
+一般来说，可选 8 种布局 atom：对应 `MN` 或 `K` major，再乘以 4 种 swizzle 模式。
 
-- 不搅拌：不搅拌。隐式 16 字节边界。
-- 32 字节混合：混合 2 个连续的 16 字节段。
-- 64 字节混合：混合 4 个连续的 16 字节段。
-- 128 字节混合：混合 8 个连续的 16 字节段。
+- 无 swizzle：默认 16 字节边界。
+- 32B swizzle：交错 2 个连续 16B 段。
+- 64B swizzle：交错 4 个连续 16B 段。
+- 128B swizzle：交错 8 个连续 16B 段。
 
 布局原子被定义[这里](https://github.com/NVIDIA/cutlass/blob/36cbfcf483cc9d2ee65a55c199176ce96da1e33e/include/cute/atom/mma_traits_sm90_gmma.hpp#L66)在 CUTLASS 代码库中为：
 
@@ -221,11 +221,11 @@ GMMA::Layout_K_SW64_Atom<T>
 GMMA::Layout_K_SW128_Atom<T>
 ```
 
-然后必须将这些布局原子传递到`tile_to_shape`形状为 SMEM`sA`和`sB`给出的`make_shape(bM,bK,bP)`或者`make_shape(bN,bK,bP)`，给定形状的众数**按这个顺序**，使得布局原子的平铺大小分为较大的 SMEM 形状的平铺大小。这最终是由选择混合模式引起的对 SMEM 形状的约束，并且与 MMA 原子形状施加的其他约束分开。
+随后把这些布局 atom 传给 `tile_to_shape`，目标形状分别是 `make_shape(bM,bK,bP)`（给 `sA`）和 `make_shape(bN,bK,bP)`（给 `sB`）。注意 mode 顺序必须保持一致，且 layout atom 的平铺尺寸必须整除目标 SMEM 形状。这些是 swizzle 选择带来的约束，和 MMA atom 形状本身的约束是独立的。
 
 ### WGMMA 片段和描述符
 
-我们已经创建了`TiledMMA`对象并相应地在主机上准备 SMEM 布局。现在，在设备上我们可以使用`TiledMMA`目的`tiled_mma`构造适当的分区张量以传递到`cute::gemm`称呼。首先，我们创建一个`ThrMMA`称为的对象`thr_mma`通过调用`get_thread_slice`方法上`tiled_mma`与线程索引，它包含从`0`到`127`在我们的例子中。
+至此我们已经创建了 `TiledMMA`，并在主机侧准备好 SMEM 布局。设备侧可用 `tiled_mma` 构造传给 `cute::gemm` 的分区张量。首先，通过 `tiled_mma.get_thread_slice(threadIdx.x)` 创建 `ThrMMA` 对象 `thr_mma`；在本例中线程索引范围是 `0..127`。
 
 然后，参考上面的内核代码片段，打印张量`tCsA`和`tCsB` **对于任何线程索引**显示以下内容：
 
@@ -243,7 +243,7 @@ tCsB: Sw&lt;3,4,3>_smem_ptr[16b](0x7f880000c400) o
 - `MMA_M`和`MMA_K`是其平铺的范围`M`和`K`的模式`sA`（以便`MMA_M=bM/64=2`和`MMA_K=bK/16=4`).
 - `PIPE`是阶段数。
 
-跨步和混合模式继承自`sA`。这里需要注意的是 WGMMA 特定的事情是`tCsA`实际上并不是 SMEM 的线程级切片，而是经过重新组织布局的整个 SMEM 张量。
+其步幅和 swizzle 模式继承自 `sA`。这里的 WGMMA 特性在于：`tCsA` 并不是真正意义上的“线程私有 SMEM 切片”，而是一个按 WGMMA 规则重组后的 SMEM 视图。
 
 接下来，打印“片段”`tCrA`和`tCrB`对于任何线程索引显示：
 
@@ -255,7 +255,7 @@ tCrB: GMMA::DescriptorIterator o (_1,_2,_4,_3):(_0,_64,_256,_1024)
 
 在内部，CUTLASS 构造了一个“[矩阵描述符](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#asynchronous-warpgroup-level-matrix-shared-memory-layout-matrix-descriptor)“，这是保存在寄存器中的 64 位值，以适合使用的方式描述 SMEM`wgmma`操作说明。对于程序员来说，最重要的是要记住 SMEM 的值是**不是**复制到RMEM；相反，访问的值`tCrA`和`tCrB`相反，访问这些 64 位描述符。此外，这些张量是“迭代器”，意味着只有单个 64 位描述符用于给定的`wgmma`指令一次保存在寄存器中（例如，而不是全部 24 个）。
 
-与操作数相比，累加器张量以更标准的方式定义。打印输出`tCgC`和`tCrC`对于线程 0 显示：
+与操作数相比，累加器张量的定义更“常规”。对线程 0 打印 `tCgC` 和 `tCrC` 可见：
 
 ```
 
@@ -263,13 +263,13 @@ tCgC: gmem_ptr[16b](0x7f877a780000) o ((_2,_2,_8),_2,_2):((512,_8,4096),_64,3276
 tCrC: ptr[16b](0x7feee1fffbe0) o ((_2,_2,_8),_2,_2):((_1,_2,_4),_32,_64)
 ```
 
-`tCgC`是输出 GMEM 张量的切片，我们要将累加器的值复制到尾声中，并且`tCrC`是创建的寄存器支持的张量，用于保存在主循环中计算的这些值。这`(MMA,MMA_M,MMA_N)`这些张量的形状可以解释如下：在 MMA 原子的`MxN=64x64`输出tile，128 个线程中的每一个都保存`32=2*2*8`价值观，以及`MMA_M=MMA_N=2`与相同`tCsA`和`tCsB`.
+`tCgC` 是输出 GMEM 张量切片（epilogue 阶段会把累加器结果写回这里）；`tCrC` 是寄存器支撑的张量，用于保存 mainloop 中累加得到的值。它们的形状 `(MMA, MMA_M, MMA_N)` 可这样理解：在 `MxN = 64x64` 的 MMA atom 输出 tile 中，128 个线程每个保存 `32 = 2*2*8` 个值；并且 `MMA_M = MMA_N = 2`，与 `tCsA`/`tCsB` 对应。
 
-每个线程以一种需要将 32 分解为 (2,2,8) 的方式来保存原子的 32 个值，以便能够为布局定义相应的步幅`tCgC`。具体的分区模式可以从这张照片中读出[来自 PTX 文档](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#wgmma-64n16-d):
+每个线程保存的 32 个值之所以拆成 `(2,2,8)`，是为了与 `tCgC` 的布局步幅定义对齐。更具体的分配模式可参考 [PTX 文档中的图示](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#wgmma-64n16-d)：
 
 ![](../images/cutlass-tutorial-wgmma-hopper/wgmma-64N16-D-1-e28ffdbdf8.png)
 
-这说明了复制的 Z 模式，其中保存了线程的 32 个值。例如，线程 0 保存 (0,0)、(0,1)、(8,0)、(8,1) 处的值，并向右每 8 列重复一次。
+它展示了复制中的 Z pattern，即线程持有 32 个值的分布方式。比如线程 0 保存 `(0,0)`、`(0,1)`、`(8,0)`、`(8,1)` 等位置的值，并沿列方向每 8 列重复。
 
 ### 重新审视 gemm 调用
 
@@ -281,9 +281,9 @@ tCrC: ptr[16b](0x7feee1fffbe0) o ((_2,_2,_8),_2,_2):((_1,_2,_4),_32,_64)
 cute::gemm(tiled_mma, tCrA(_,_,_,read_pipe), tCrB(_,_,_,read_pipe), tCrC);
 ```
 
-的各种过载`cute::gemm`方法用于首先循环外部模式`MMA_M/N`和`MMA_K`。一旦选择了这些坐标，我们就只需使用 MMA 原子tile形状进行计算。换句话说，我们首先减少过载`cute::gemm`为[调度形状](https://github.com/NVIDIA/cutlass/blob/be60a0b27204078dc0f3f1d6ed4a95cdb2114111/include/cute/algorithm/gemm.hpp#L178) `(V)x(V)=>(V)`.
+`cute::gemm` 的多层重载会先遍历外层 mode（`MMA_M/N` 和 `MMA_K`）。当这些坐标固定后，内部就退化为对 MMA atom tile 的计算。换句话说，先把高层 `cute::gemm` 降到[调度形状](https://github.com/NVIDIA/cutlass/blob/be60a0b27204078dc0f3f1d6ed4a95cdb2114111/include/cute/algorithm/gemm.hpp#L178) `(V)x(V)=>(V)`。
 
-然后代码调用[`fma`手术](https://github.com/NVIDIA/cutlass/blob/be60a0b27204078dc0f3f1d6ed4a95cdb2114111/include/cute/arch/mma_sm90_gmma.hpp#L401)MMA 原子（准确地说，在[mma_解压](https://github.com/NVIDIA/cutlass/blob/be60a0b27204078dc0f3f1d6ed4a95cdb2114111/include/cute/atom/mma_traits.hpp#L112)方法）。这包含内联 PTX 程序集：
+随后会调用 MMA atom 的 [`fma` 操作](https://github.com/NVIDIA/cutlass/blob/be60a0b27204078dc0f3f1d6ed4a95cdb2114111/include/cute/arch/mma_sm90_gmma.hpp#L401)（更准确地说，经由 [`mma_unpack`](https://github.com/NVIDIA/cutlass/blob/be60a0b27204078dc0f3f1d6ed4a95cdb2114111/include/cute/atom/mma_traits.hpp#L112)）。其中包含如下内联 PTX：
 
 ```
 
@@ -327,13 +327,13 @@ CUTE_HOST_DEVICE static void
   }
 ```
 
-该语法对应的 PTX 文档是[这里](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#asynchronous-warpgroup-level-matrix-instructions-wgmma-mma)。与张量的描述一致`tCrA`, `tCrB`， 和`tCrC`上面，观察我们有`uint64`变量`desc_a`和`desc_b`对于操作数以及 16`uint32`累加器的变量。`scale_D`是`0`或者`1`，并控制累加器是否进行零初始化。
+这段语法对应的 PTX 说明在[这里](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#asynchronous-warpgroup-level-matrix-instructions-wgmma-mma)。与上文 `tCrA`、`tCrB`、`tCrC` 的解释一致：操作数通过 `uint64` 的 `desc_a`/`desc_b` 传入，累加器由 16 个 `uint32` 变量承载。`scale_D` 取 `0` 或 `1`，控制是否对累加器做零初始化。
 
-此外，变量`scaleA`, `scaleB`, `tnspA`, `tnspB`是在编译时外部确定的`fma`通过模板参数的方法。`scaleA`和`scaleB`为 1 或 -1 来否定操作数，而`tnspA`和`tnspB`表示是否转置操作数，为0或1`GMMA::Major::K`或者`GMMA::Major::MN`， 分别。
+此外，`scaleA`、`scaleB`、`tnspA`、`tnspB` 这些量通过模板参数在编译期确定。`scaleA`/`scaleB` 取 1 或 -1（用于符号翻转），`tnspA`/`tnspB` 表示是否转置操作数，其值由 `GMMA::Major::K` 或 `GMMA::Major::MN` 决定。
 
 ### WGMMA 的同步
 
-仍然需要解释围绕`cute::gemm`称呼：
+还需要解释 `cute::gemm` 前后的这组调用：
 
 ```
 
@@ -343,7 +343,7 @@ cute::warpgroup_commit_batch();
 cute::warpgroup_wait<0>();
 ```
 
-为什么需要这些额外的命令？它们与`wgmma`的本质是*异步*操作说明。在Hopper架构的背景下，*异步*表明`wgmma`可以与其他操作同时运行，因此需要依赖步骤的同步机制。该机制在 PTX 中有详细阐述[内存一致性模型](https://docs.nvidia.com/cuda/archive/12.3.2/parallel-thread-execution/index.html#program-order-async-operations)。代码中不正确的同步可能会导致 (a) 微妙的竞争条件，从而导致具有挑战性的错误，(b) 编译器序列化`wgmma`指令，这可能会导致性能显着下降，或 (c) 未定义的行为。
+为什么要有这些额外调用？因为 `wgmma` 本质上是 *异步* 指令。在 Hopper 上，“异步”意味着 `wgmma` 可与其他操作并行推进，因此依赖关系必须用显式同步来约束。其机制可参考 PTX 的[内存一致性模型](https://docs.nvidia.com/cuda/archive/12.3.2/parallel-thread-execution/index.html#program-order-async-operations)。同步写错会导致：(a) 隐蔽竞态；(b) 编译器把 `wgmma` 串行化从而显著降速；(c) 未定义行为。
 
 突出显示的`cute`方法包装以下 PTX 指令：
 
@@ -351,42 +351,42 @@ cute::warpgroup_wait<0>();
 - `cute::warpgroup_commit_batch()` — `wgmma.commit_group.sync.aligned`;
 - `cute::warpgroup_wait<N>()` — `wgmma.wait_group.sync.aligned N`;
 
-（请注意，我们一直在使用`wgmma`作为简写`wgmma.mma_async`让我们将这些命令的用法与以下基于 WGMMA 的 GEMM 的逐字描述联系起来：[PTX 文档](https://docs.nvidia.com/cuda/archive/12.3.2/parallel-thread-execution/index.html#asynchronous-warpgroup-level-matrix-multiply-accumulate-instructions):
+（注意：文中一直将 `wgmma.mma_async` 简写为 `wgmma`。）下面把这些命令与 PTX 文档中 WGMMA GEMM 的流程对应起来：
 
-1. 加载矩阵`A`, `B`， 和`D`进入寄存器或共享内存。
-2. 执行以下操作`fence`运营：`wgmma.fence`操作来指示跨warpgroup的register/shared-memory已被写入。  `fence.proxy.async`操作使通用代理操作对异步代理可见。
-3. 使用以下命令发出异步矩阵乘法和累加运算`wgmma.mma_async`对输入矩阵的运算。这`wgmma.mma_async`操作在异步代理中执行。
-4. 创建一个 wgmma-group 并提交所有先前未完成的`wgmma.mma_async`操作进入组，通过使用`wgmma.commit_group`手术。
-5. 使用以下命令等待所需的 wgmma-group 完成`wgmma.wait_group`.
-6. 一旦 wgmma-group 完成，所有`wgmma.mma_async`操作已执行并完成。
+1. 将矩阵 `A`、`B`、`D` 加载到寄存器或共享内存。
+2. 执行 `fence`：`wgmma.fence` 用于声明 warpgroup 视角下的 register/shared-memory 写入已就绪；`fence.proxy.async` 用于让通用代理写入对异步代理可见。
+3. 通过 `wgmma.mma_async` 发射异步 MMA 运算（在异步代理中执行）。
+4. 通过 `wgmma.commit_group` 创建并提交一个 wgmma-group，把此前尚未提交的 `wgmma.mma_async` 纳入该组。
+5. 通过 `wgmma.wait_group` 等待所需 wgmma-group 完成。
+6. 组完成后，该组内所有 `wgmma.mma_async` 均已执行完毕。
 
-我们按顺序解释这些要点。首先，一个`wgmma.fence`指令确保`wgmma.mma_async`仅在对某些 RMEM 地址的所有先前访问完成后才访问此类地址。如果没有`wgmma.fence`，行为未定义。此规则的一个例外是 Hopper 允许*多种的*`wgmma.mma_async`指示同时飞行。只要有这些`wgmma.mma_async`指令具有相同的累加器形状，它们可以共享相同的累加器张量 即，写入相同的寄存器内存地址。在这种情况下，不需要围栏。例如，我们不需要插入`wgmma.fence`在循环内`MMA_K`作为一部分完成`cute::gemm`称呼。
+先看 `wgmma.fence`：它保证 `wgmma.mma_async` 访问某些 RMEM 地址前，相关先前访问已经完成。缺少 `wgmma.fence` 会导致未定义行为。一个例外是 Hopper 允许多个 `wgmma.mma_async` 在 flight；若它们累加器形状一致，可共享同一累加器张量（即写同一批寄存器地址），这种情况下不需要额外 fence。例如在 `cute::gemm` 内部沿 `MMA_K` 循环时，通常不必每步插入 `wgmma.fence`。
 
-一样[TMA操作](https://research.colfax-intl.com/tutorial-hopper-tma/), `wgmma.mma_async`执行于[异步代理](https://docs.nvidia.com/cuda/parallel-thread-execution/#async-proxy)。因此，*如果*在通用代理中执行的操作会影响 SMEM 读取`wgmma.mma_async`，我们需要发出`fence.proxy.async`。例如，如果我们复制，就会出现这种情况`A`和`B`通过普通方式进入SMEM`ld.global` / `st.shared`运营。由于我们使用TMA负载，所以我们不需要`fence.proxy.async`在我们的示例中，它确实没有出现在 WGMMA 教程代码中或 CUTLASS Hopper GEMM 内核的主循环中。 （为了验证这一点，请注意`fence.proxy.async`被包裹着`cutlass::arch::fence_view_async_shared()`).
+与 [TMA 操作](https://research.colfax-intl.com/tutorial-hopper-tma/)类似，`wgmma.mma_async` 运行在[异步代理](https://docs.nvidia.com/cuda/parallel-thread-execution/#async-proxy)中。因此，*如果* 通用代理中的操作会影响 `wgmma.mma_async` 读取的 SMEM 内容，就需要 `fence.proxy.async`。例如使用普通 `ld.global / st.shared` 把 `A/B` 搬到 SMEM 时就属于这种情况。本文示例使用的是 TMA load，所以不需要 `fence.proxy.async`；这也是它在教程代码与 CUTLASS Hopper GEMM mainloop 中都未出现的原因（对应封装是 `cutlass::arch::fence_view_async_shared()`）。
 
-这`wgmma.commit_group`指令为每个 warpgroup 创建一个新的 wgmma-group 并批处理所有先前的`wgmma.mma_async`指令由执行 warpgroup 发起，但未提交给任何 wgmma-group 到新的 wgmma-group。在我们的例子中，`cute::warpgroup_commit_batch()`批次`MMA_M*MMA_N*MMA_K`许多`wgmma.mma_async`将指令放入一个 wgmma 组中。
+`wgmma.commit_group` 会为当前 warpgroup 创建一个新的 wgmma-group，并把该 warpgroup 先前发起但尚未归组的 `wgmma.mma_async` 一次性提交到该组。在我们的示例中，`cute::warpgroup_commit_batch()` 会把 `MMA_M*MMA_N*MMA_K` 条 `wgmma.mma_async` 放入同一组。
 
-最后，`wgmma.wait_group`带论证的指令`N`将使执行线程等待，直到`N`或更少的最新 wgmma 组处于待处理状态，并且由执行线程提交的所有先前的 wgmma 组均已完成。在我们的例子中，我们让`N=0`，因此 warpgroup 只是等待整个 wgmma-group 的完成，然后再继续执行任何后续指令。
+最后，`wgmma.wait_group N` 会让执行线程等待，直到“最多只剩 `N` 个最新 wgmma-group 仍在 pending”，并保证更早提交的组已完成。在我们的例子里 `N=0`，因此 warpgroup 会等待当前组全部完成后再执行后续指令。
 
 在 warpgroup 有机会执行独立计算的情况下，参数的灵活性`N`派上用场了。例如，这与设计中采用的 GEMM-softmax 重叠策略一起发挥作用[FlashAttention-3](https://research.colfax-intl.com/flashattention-3-fast-and-accurate-attention-with-asynchrony-and-low-precision/).
 
 ### WGMMA 核心矩阵
 
-最后一节进一步讨论矩阵tile的布局要求`A`和`B`加载到 SMEM 中，假设`wgmma`其两个操作数均来自 SMEM。为了简化讨论，首先假设`A`是行主并且`B`是列主（即，两者都是`K`-主要的）。还记得`wgmma`指令的tile形状`MxNxK`受到约束，使得`M`是 64，`K`乘以数据类型的大小 32 字节，并且`N`是 8 的倍数，从 8 到 256。为了避免与`A`/`B`或者`sA`/`sB`，我们将 WGMMA 原子tile记为`wA`和`wB`.
+最后一节继续讨论 `A`、`B` 加载到 SMEM 后的布局约束（假设 `wgmma` 两个操作数都来自 SMEM）。为简化说明，先假设 `A` 为行主、`B` 为列主（即都可视作 `K`-major）。回忆 `wgmma` 的 tile 形状 `MxNxK` 受限：`M=64`，`K * sizeof(dtype)=32B`，`N` 是 8 到 256 的 8 倍数。为避免与 `A/B` 或 `sA/sB` 混淆，这里将 WGMMA atom tile 记作 `wA` 与 `wB`。
 
-矩阵`wA`和`wB`被分成许多较小的矩阵，称为*核心矩阵。*每个核心矩阵都有一个*迈步*方向和一个*连续的*方向，使其在跨步方向上的长度为 8，在连续方向上的长度为 16 个字节。矩阵`wA`是由`8x2`核心矩阵和矩阵`wB`是由`2x(N/8)`核心矩阵。我们展示了一个平铺`wA`和`wB`按如下核心矩阵（图像取自 PTX 文档）：
+矩阵 `wA` 和 `wB` 会被分解为更小的 *core matrix*。每个 core matrix 有一个 stride 方向和一个 contiguous 方向：stride 方向长度为 8，contiguous 方向长度为 16 字节。`wA` 由 `8x2` 个 core matrix 组成，`wB` 由 `2x(N/8)` 个 core matrix 组成。其平铺方式如下（图来自 PTX 文档）：
 
 ![](../images/cutlass-tutorial-wgmma-hopper/wgmma2-b1903ccf45.png)
 
 ![](../images/cutlass-tutorial-wgmma-hopper/wgmma3-bcb36fa6cc.png)
 
-如上所述，`wgmma`在SS模式下需要[矩阵描述符](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#asynchronous-warpgroup-level-matrix-shared-memory-layout-matrix-descriptor)对于两者`wA` (`desc-a`） 和`wB` (`desc-b`）作为输入。该描述符编码五个参数：
+如上，`wgmma` 在 `SS` 模式下需要为 `wA`（`desc-a`）和 `wB`（`desc-b`）提供[矩阵描述符](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#asynchronous-warpgroup-level-matrix-shared-memory-layout-matrix-descriptor)。描述符编码以下 5 个参数：
 
 - 起始地址：SMEM 中操作数的起始基地址。
 - LBO (*主维字节偏移量*): 中两个相邻核心矩阵之间的距离（以字节为单位）`K`方面。
 - SBO (*步幅维度字节偏移量*): 中两个相邻核心矩阵之间的距离（以字节为单位）`M`或者`N`方面。
 - 调配模式：无、32、64 或 128 字节。
-- 矩阵基偏移量：这用于解决 SMEM 地址未与混合模式的重复模式的字节边界对齐的情况下的 SMEM 对齐问题。
+- Matrix base offset：用于处理 SMEM 地址未对齐到 swizzle 周期边界时的对齐问题。
 
 LBO 和 SBO 如上图所示。
 
@@ -400,7 +400,7 @@ No swizzle       : Swizzle&lt;0,4,3> o smem_ptr o ((8,m),(T,2)):((1T,SBO),(1,LBO
 128-byte swizzle : Swizzle&lt;3,4,3> o smem_ptr o ((8,m),(T,2)):((8T,SBO),(1, T ))
 ```
 
-对于[*袖珍的*](https://github.com/NVIDIA/cutlass/blob/be60a0b27204078dc0f3f1d6ed4a95cdb2114111/include/cute/layout.hpp#L415)由 GMMA 布局原子生成的布局 =>`tile_to_shape`模式（注意 GMMA 布局`K`原子具有较大的`K`-模式比 64 和 128 字节混合情况下的 WGMMA 原子形状！），我们有 LBO 和 SBO 的相应值：
+对于由 GMMA layout atom 经 `tile_to_shape` 生成的[*紧凑（compact）*](https://github.com/NVIDIA/cutlass/blob/be60a0b27204078dc0f3f1d6ed4a95cdb2114111/include/cute/layout.hpp#L415)布局（注意：在 64B/128B swizzle 场景下，GMMA 的 `K`-layout atom 在 `K` 方向会大于 WGMMA atom 形状），对应 LBO/SBO 为：
 
 ```
 
@@ -410,7 +410,7 @@ No swizzle       : LBO = 16x8 = 128 bytes. SBO = 32x8 = 256 bytes.
 128-byte swizzle : SBO = 128x8 = 1024 bytes.
 ```
 
-最值得注意的是，对于 64 和 128 字节 swizzle，步长使得给定的可接受的 WGMMA 布局为**不是**袖珍的。相反，有一组 2 或 4 个 WGMMA 原子操作数块并排堆叠在`K`- 方向，导致大步前进`4T`和`8T`对于核心矩阵`M`-模式。换句话说，当混合一个内存中的交错时，2、4 或 8 个核心矩阵在逻辑上相邻`K`-mode，这些核心矩阵将属于*不同的*用于 64 和 128 字节混合的 WGMMA 原子。
+最关键的是：在 64B 和 128B swizzle 下，可接受的 WGMMA 布局通常**不是 compact**。可以理解为有 2 或 4 组 WGMMA atom 操作数块并排堆在 `K` 方向，从而使 core matrix 在 `M` 方向出现 `4T` 或 `8T` 的大步幅。也就是说，内存中逻辑上在 `K` 方向相邻的 2/4/8 个 core matrix，实际上会落到不同的 WGMMA atom 中。
 
 为了完整起见，我们还给出了可接受的 WGMMA 布局`MN`-重大案件：
 
@@ -424,12 +424,12 @@ No swizzle       : Swizzle&lt;0,4,3> o smem_ptr o ((T,1,m),(8,k)):((1,T,SBO),(1T
 
 ### 结论
 
-在 GEMM 系列的[第 1 部分] 中，我们介绍了使用 WGMMA（warp群矩阵乘法和累加）作为基于 Hopper 的 GEMM 中的原语所涉及的核心概念。
+在 GEMM 系列的[第 1 部分] 中，我们介绍了在 Hopper GEMM 中把 WGMMA（warpgroup matrix multiply-accumulate）作为底层原语时需要掌握的核心概念。
 
-WGMMA 需要一个 warpgroup（128 个线程）来共同执行矩阵乘法，并且只能对矩阵的某些片段进行操作。我们研究了其中涉及的特殊形状和布局，重点是如何使用规范的 GMMA 布局来构造保证被 WGMMA 接受的操作数布局=>`tile_to_shape`图案。
+WGMMA 需要一个 warpgroup（128 线程）协同执行，并且只能作用在受约束的矩阵分块上。我们分析了其中涉及的特殊 shape 与 layout，重点说明了如何通过标准 GMMA layout atom + `tile_to_shape` 构造出可被 WGMMA 接受的操作数布局。
 
 为了明确其用法，WGMMA 还需要某些同步机制。为此，我们解释了`wgmma.fence`, `fence.proxy.async`, `wgmma.commit_group`和`wgmma.wait_group`关于`wgmma.mma_async`.
 
 最后，我们详细解释了 WGMMA 核心矩阵的内部工作原理，以及 CUTLASS 如何为来自 SMEM 的操作数构造矩阵描述符。
 
-总的来说，这篇博文应该使程序员能够在使用 WGMMA 的 Hopper 上编写 CUTLASS 内核。在[第 2 部分]中，我们将扩展此讨论以合并 TMA，以及如何在 Hopper GEMM 内核中串联使用 TMA 和 WGMMA 以便重叠复制和计算。
+总之，本文旨在帮助你在 Hopper 上使用 WGMMA 编写 CUTLASS 内核。在[第 2 部分]中，我们会进一步引入 TMA，并讨论如何在 Hopper GEMM 内核中把 TMA 与 WGMMA 串联起来，实现 copy 与 compute 的重叠。
