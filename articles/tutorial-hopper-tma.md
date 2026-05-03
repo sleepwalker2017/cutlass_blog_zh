@@ -74,10 +74,10 @@ void host_fn(T* data, int M, int N) {
 
 这里的 `gmem_layout`、`gmem_tensor` 和 `smem_tensor` 仅用到了 CuTe 的基础概念，读者可先参考这些 [CuTe 教程 1](https://github.com/NVIDIA/cutlass/blob/637b15906358191cb4238af419d408a65819d7ec/media/docs/cute/01_layout.md)、[教程 2](https://github.com/NVIDIA/cutlass/blob/637b15906358191cb4238af419d408a65819d7ec/media/docs/cute/02_layout_algebra.md)、[教程 3](https://github.com/NVIDIA/cutlass/blob/637b15906358191cb4238af419d408a65819d7ec/media/docs/cute/03_tensor.md)。这里的重点是 `tma_load` 对象：它是一个 `cute::TiledCopy` 实例，保存了执行 CTA 范围 copy 所需的信息与方法。示例中，`tma_load` 是通过 `cute::make_tma_copy` 的[显式默认配置](https://github.com/NVIDIA/cutlass/blob/637b15906358191cb4238af419d408a65819d7ec/include/cute/atom/copy_traits_sm90_tma.hpp#L1206-L1217)构造的。虽然该函数完整实现还有一些细节（本文后面讨论 `MULTICAST` 时会展开），但显式默认值已覆盖大多数场景，也更不容易出错。
 
-让我们看看我们使用的签名`make_tma_copy`:
+先看我们使用的 `make_tma_copy`：
 
-- 它的最后两个参数是`gmem_tensor`和`smem_layout`。在引擎盖下，`make_tma_copy`使用此信息来创建`TmaDescriptor`，这只是一个别名[CU张量图](https://github.com/NVIDIA/cutlass/blob/637b15906358191cb4238af419d408a65819d7ec/include/cute/arch/copy_sm90_desc.hpp#L178)。该描述符对象在 TMA 内核内部使用。
-- 它的第一个参数是一个实例`SM90_TMA_LOAD`。该对象将复制操作分派到所需的位置`cp.async.bulk.tensor`PTX 调用，我们将在下面的第三部分更深入地讨论。
+- 最后两个参数是 `gmem_tensor` 和 `smem_layout`。在底层，`make_tma_copy` 会用它们构造 `TmaDescriptor`（本质上是 [cuTensorMap](https://github.com/NVIDIA/cutlass/blob/637b15906358191cb4238af419d408a65819d7ec/include/cute/arch/copy_sm90_desc.hpp#L178) 的封装），该描述符会在 TMA kernel 内部使用。
+- 第一个参数是 `SM90_TMA_LOAD{}`。它决定 copy 最终分派到哪种 `cp.async.bulk.tensor` PTX 调用（后文会展开）。
 
 #### **内核代码**
 
@@ -188,7 +188,7 @@ ArithTuple(0,112) o (_16,_16):(_1@1,_1@0):
 
 #### 例如任务和代码
 
-出于说明目的，让我们考虑 TMA 加载的反向示例，其中我们从多个 CTA 中的 SMEM 复制到分区 GMEM 张量中的相应tile。这里的区别在于，我们将在将 CTA 中的 SMEM tile复制到 GMEM 之前用简单的数字模式填充它们（否则，我们将复制未定义的值）。功能代码片段如下：
+为了说明 TMA store，我们看一个与前文相反的示例：把多个 CTA 中的 SMEM 数据复制到分区后的 GMEM 张量对应 tile。这里我们会先用简单数值模式填充 SMEM tile，再执行 copy（否则会把未定义值写回 GMEM）。代码片段如下：
 
 ```
 
@@ -264,15 +264,18 @@ TMA 加载和存储代码之间最重要的区别是我们不再看到任何 mba
 
 ## 深入了解 TMA 操作
 
-TMA LOADTMA STORE方向GMEM -> SMEMSMEM -> GMEM同步方式内存屏障代理围栏何时同步手术后手术前TMA操作总结。
+先做一个简要对比：
+
+- TMA load：方向 `GMEM -> SMEM`；主要依赖 `mbarrier` 同步；通常在 copy 发出后等待完成。
+- TMA store：方向 `SMEM -> GMEM`；主要依赖 `fence.proxy.async`；通常在 copy 发出前保证可见性。
 
 到目前为止，我们已经学习了如何调用 TMA 加载和 TMA 存储操作。上表对这些操作进行了比较和对比。要调用任一操作，我们需要创建一个类似于`TiledCopy`通过`cute::make_tma_copy`主机代码上的方法，然后将此对象传递给内核函数，我们在其中使用它们`cute::copy`实际调用该操作。在本节中，我们将更深入地探讨当我们调用这些时实际发生的情况`TiledCopy`核函数中的对象。通过这次深入研究，我们讨论了两个扩展：TMA 存储归约和 TMA 负载多播。
 
 #### PTX TMA 加载和存储指令
 
-PTX ([并行线程执行](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html)）是 NVIDIA GPU 的低级中间语言。对于我们的讨论，PTX 的相关部分包含一组指令，这些指令可以通过由`asm volatile`关键词。特别是当我们调用`cute::copy(tma_load, ...)`或者`cute::copy(tma_store, ...)`如前几节所述，调用某些 PTX 指令来执行这些操作。通过研究PTX，我们可以更好地理解TMA加载和TMA存储。
+PTX（[Parallel Thread Execution](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html)）是 NVIDIA GPU 的低级中间表示。在本文语境下，关键是：`cute::copy(tma_load, ...)` 和 `cute::copy(tma_store, ...)` 最终都会映射到具体的 PTX 指令。理解这些 PTX 指令，有助于理解 TMA 的真实执行语义。
 
-让我们从 TMA 负载开始。回想一下，当我们创建`tma_load`在主机代码中的对象中，我们必须提供 GMEM 张量（其中包含要复制的源数据）和 SMEM 布局（描述数据在每个 CTA 内部的外观）。使用此张量和布局，CuTe 确定在以下情况下要执行的底层 PTX 指令：`cute::copy(tma_load, ...)`在内核中被调用。 PTX 指令的选择取决于*秩*GMEM 张量的（注意*秩*这里表示张量的维数，与线性代数中的矩阵 rank/nullity 相对）。在我们的示例中，GMEM 张量具有二阶，因此[以下 PTX 指令](https://github.com/NVIDIA/cutlass/blob/637b15906358191cb4238af419d408a65819d7ec/include/cute/arch/copy_sm90_tma.hpp#L100-L106)将被执行：
+先看 TMA load。回忆一下，主机侧构造 `tma_load` 时，我们传入 GMEM 张量（源数据）和 SMEM 布局（CTA 内目标布局）。CuTe 会据此决定 `cute::copy(tma_load, ...)` 对应的底层 PTX 形式。这个选择与 GMEM 张量的*秩*（维数）有关。本文示例是 2D 张量，因此会走[这条 PTX 路径](https://github.com/NVIDIA/cutlass/blob/637b15906358191cb4238af419d408a65819d7ec/include/cute/arch/copy_sm90_tma.hpp#L100-L106)：
 
 ```
 
@@ -285,9 +288,9 @@ PTX ([并行线程执行](https://docs.nvidia.com/cuda/parallel-thread-execution
       : "memory");
 ```
 
-看看这条PTX指令，我们看到许多熟悉的概念。例如，`gmem_int_desc`指保存在 TMA 描述符中的坐标，而`mbarrier::complete_tx::bytes`和`smem_int_mbar`参考内存屏障。另请注意`tensor.2d`指的是我们正在复制一个 2 阶张量 即，一个 2D 矩阵。
+这条 PTX 指令里有几个熟悉的部分：`gmem_int_desc` 对应 TMA 描述符中的坐标信息，`mbarrier::complete_tx::bytes` 与 `smem_int_mbar` 对应同步屏障；`tensor.2d` 表示目标是二维张量（2D 矩阵）。
 
-事实证明，不仅 TMA 加载，所有 TMA 操作都是某些特定操作的包装器`cp.async.bulk`指示。这[NVIDIA PTX 文档专用于整个部分](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-bulk)讨论`cp.async.bulk`指令，特别是它们的语法和操作数。我们鼓励读者阅读该部分和其中的参考资料，以更深入地研究 TMA 操作，其涵盖的范围比本博客文章的预期范围大得多。在这里，我们将讨论通过这些公开的 TMA 的两个扩展`cp.async.bulk`指示。
+不仅是 TMA load，所有 TMA 操作本质上都可视作对 `cp.async.bulk` 系列指令的封装。NVIDIA 在 PTX 文档里有完整章节介绍其语法与操作数（见[这里](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-bulk)）。下面只讨论两个在实践里常用的扩展。
 
 #### TMA 商店减少
 
@@ -359,9 +362,9 @@ cp.async.bulk.tensor.dim.dst.src{.load_mode}.completion_mechanism
 
 同样，无需完全理解 PTX 指令的语法，我们就可以看到许多熟悉的概念，例如`.dim`, `.global`为了`src`， 和`.mbarrier`为了`completion_mechanism`。本节重点介绍`multicast`操作数。
 
-多发射指一个情况,我们在GMEM索中有一个,我们想将其复制到.*多种的*SMEM 位于多个 CTA 中。这通常是 GEMM 内核（即，矩阵乘法）中的情况，其中多个行切片需要输入矩阵列切片，反之亦然。在这种情况下，虽然 TMA 负载仍然可以完美运行 - 我们只需向需要它的多个 CTA 提供相同的 TMA 描述符 -`.multicast`操作数允许我们*保证*L2 缓存命中。
+multicast 指的是这样一种场景：GMEM 中同一块数据需要被复制到多个 CTA 的 SMEM。GEMM 就是典型例子：多个输出行（或列）会复用同一输入切片。即便不用 multicast 也能正确执行（给多个 CTA 传同一 TMA 描述符即可），但 `.multicast` 能显式利用硬件路径并提升 L2 命中表现。
 
-让我们考虑将上述 TMA 负载示例扩展到多播负载示例。首先，我们需要定义*簇*我们内核的维度是不平凡的，因为 CTA 子集共同参与 TMA 负载多播操作的要求是它们属于同一个[（线程块）集群](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#thread-block-clusters)。为了简单起见，我们只需更改网格尺寸，如下所示：
+我们把前面的 TMA load 示例扩展为 multicast load。第一步是定义非平凡的 *cluster* 维度，因为参与同一次 TMA multicast 的 CTA 必须属于同一个[thread block cluster](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#thread-block-clusters)。为简化起见，只改网格/cluster 维度：
 
 ```
 
@@ -376,7 +379,7 @@ dim3 cluster_dums = dim3{1, 1, 2};
 
 请注意，使用集群时，集群维度必须均匀划分为网格维度，否则内核将无法启动。在我们的新内核中，我们将为同一集群中的每对 CTA 安排相同的 GMEM tile加载到每个 CTA 的 SMEM 中，当且仅当两个 CTA 具有相同的值时才会发生这种情况。`blockIdx.x`和`blockIdx.y`.
 
-首先，在主机代码中我们对TMA负载的定义进行以下更改`TiledCopy`目的：
+在主机代码里，`TiledCopy` 的定义改成：
 
 ```
 
@@ -388,7 +391,7 @@ auto tma_load = make_tma_copy(SM90_TMA_LOAD_MULTICAST{},
       gmem_tensor, smem_layout, cute::_2{});
 ```
 
-我们写`_2{}`对于最后一个参数（簇大小）将其作为编译时常量传递，使用[CuTe 整数类型](https://github.com/NVIDIA/cutlass/blob/main/media/docs/cute/01_layout.md#integers)为此目的而提供。在实践中，更惯用的是，我们会定义`ClusterShape`事先输入（在我们的例子中，是`Shape<_1,_1,_2>`）然后写`size<2>ClusterShape{}`对于该参数。
+这里最后一个参数 `_2{}` 表示 cluster size，并以编译期常量传入（CuTe 整数类型见[这里](https://github.com/NVIDIA/cutlass/blob/main/media/docs/cute/01_layout.md#integers)）。更常见的写法是先定义 `ClusterShape`（例如 `Shape<_1,_1,_2>`），再传 `size<2>(ClusterShape{})`。
 
 然后我们将内核代码更改如下：
 
